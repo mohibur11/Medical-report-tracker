@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { Thumb } from './Thumb.tsx';
+import { detectConflicts, isBlocked, type Conflict } from '../lib/extract/conflicts.ts';
 import { formatDmy, parseDmyInput, rankDateCandidates, type DateCandidate } from '../lib/extract/dates.ts';
 import { buildName } from '../lib/naming/sanitize.ts';
 import { commitItem, runOcr, type IngestItem, type Patient } from '../lib/ipc.ts';
@@ -34,6 +35,7 @@ export function ReviewRow({
   const [error, setError] = useState<string | null>(null);
   const [reading, setReading] = useState(false);
   const [candidates, setCandidates] = useState<DateCandidate[]>([]);
+  const [pageText, setPageText] = useState('');
 
   /**
    * Read the page and pre-fill the date.
@@ -51,6 +53,7 @@ export function ReviewRow({
       (page) => {
         if (!alive) return;
         setReading(false);
+        setPageText(page.text);
         const ranked = rankDateCandidates(page.text);
         setCandidates(ranked);
         // Only pre-fill an untouched field — never overwrite typing.
@@ -66,7 +69,20 @@ export function ReviewRow({
 
   const iso = parseDmyInput(date);
   const patient = patients.find((p) => p.id === patientId);
-  const ready = Boolean(iso && title.trim() && patient);
+
+  // Everything the app noticed but must not decide alone. Blocking ones refuse
+  // the save; the rest are questions shown next to the answer.
+  const conflicts: Conflict[] = detectConflicts({
+    chosen: iso,
+    chosenRaw: candidates.find((c) => c.iso === iso)?.raw ?? null,
+    text: pageText,
+    candidates,
+    patientDob: patient?.dob ?? null,
+    patientName: patient?.displayName,
+  });
+  const blocked = isBlocked(conflicts);
+
+  const ready = Boolean(iso && title.trim() && patient) && !blocked;
 
   // Undated files are filed under <Patient>/Undated rather than guessed into a
   // year, so an empty date is allowed but visibly different.
@@ -209,6 +225,36 @@ export function ReviewRow({
             )}
           </p>
         )}
+
+        {conflicts.map((c) => (
+          <div
+            key={c.kind}
+            className={`mt-1.5 rounded border px-2 py-1.5 text-xs ${
+              c.severity === 'blocking'
+                ? 'border-red-300 bg-red-50 text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200'
+                : 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200'
+            }`}
+          >
+            <span className="font-medium">
+              {c.severity === 'blocking' ? 'Cannot file: ' : 'Please check: '}
+            </span>
+            {c.message}
+            {c.options && (
+              <span className="ml-1 inline-flex flex-wrap gap-1.5 align-middle">
+                {c.options.map((o) => (
+                  <button
+                    key={o.value}
+                    type="button"
+                    onClick={() => setDate(formatDmy(o.value))}
+                    className="rounded border border-current px-1.5 py-0.5 font-medium hover:bg-white/60 dark:hover:bg-black/20"
+                  >
+                    {o.label}
+                  </button>
+                ))}
+              </span>
+            )}
+          </div>
+        ))}
 
         {error && <p className="mt-1 text-xs text-red-600 dark:text-red-400">{error}</p>}
       </div>

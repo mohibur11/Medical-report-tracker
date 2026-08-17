@@ -159,6 +159,14 @@ fn mark_failed(conn: &Connection, id: &str, error: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Dates are ISO on disk and day-first everywhere a person reads them.
+fn display_dmy(iso: &str) -> String {
+    match (iso.get(0..4), iso.get(5..7), iso.get(8..10)) {
+        (Some(y), Some(m), Some(d)) => format!("{d}/{m}/{y}"),
+        _ => iso.to_string(),
+    }
+}
+
 pub struct CommitRequest<'a> {
     pub ingest_id: &'a str,
     pub patient_id: &'a str,
@@ -191,13 +199,46 @@ pub fn commit(
         return Err("staged file no longer exists on disk — re-import this file".into());
     }
 
-    let patient_name: String = conn
+    let (patient_name, patient_dob): (String, Option<String>) = conn
         .query_row(
-            "SELECT display_name FROM patients WHERE id = ?1",
+            "SELECT display_name, dob FROM patients WHERE id = ?1",
             params![req.patient_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(|e| format!("no such patient: {e}"))?;
+
+    // The review screen already refuses these, but it is the wrong place to rely
+    // on: a saved record that is wrong on its face is not recoverable by reading
+    // it later. Each message says which value to correct.
+    if !naming::is_valid_doc_date(req.doc_date) {
+        return Err(format!(
+            "'{}' is not a real date. Correct the date before filing.",
+            req.doc_date
+        ));
+    }
+
+    let today: String = conn
+        .query_row("SELECT date('now')", [], |r| r.get(0))
+        .unwrap_or_default();
+    if !req.doc_date.starts_with("0000") && !today.is_empty() && req.doc_date > today.as_str() {
+        return Err(format!(
+            "{} is in the future. Correct the date before filing.",
+            display_dmy(req.doc_date)
+        ));
+    }
+
+    if let Some(dob) = patient_dob.as_deref().filter(|d| naming::is_valid_doc_date(d)) {
+        if !req.doc_date.starts_with("0000") && req.doc_date < dob {
+            return Err(format!(
+                "This report is dated {}, before {}'s date of birth ({}). \
+                 One of the two is wrong — correct the date, or fix the date of birth \
+                 on the patient, before filing.",
+                display_dmy(req.doc_date),
+                patient_name,
+                display_dmy(dob)
+            ));
+        }
+    }
 
     let ext = staged
         .extension()
@@ -662,6 +703,50 @@ mod tests {
 
         trash(&f.conn, &f.user, &f.vault(), &doc.id).unwrap();
         assert!(trash(&f.conn, &f.user, &f.vault(), &doc.id).unwrap_err().contains("No such document"));
+    }
+
+    #[test]
+    fn a_report_dated_before_the_patient_was_born_is_refused_with_advice() {
+        let f = Fx::new("before-birth");
+        f.conn.execute("UPDATE patients SET dob = '1992-03-09' WHERE id = ?1", params![f.patient]).unwrap();
+
+        let id = f.stage("jpg", b"x");
+        let err = f.commit(&id, "1985-06-01", "CBC").unwrap_err();
+
+        assert!(err.contains("before"), "got: {err}");
+        assert!(err.contains("Rahim Uddin"), "must name the patient: {err}");
+        assert!(err.contains("09/03/1992"), "must show the DOB day-first: {err}");
+        assert!(err.contains("correct the date"), "must say what to fix: {err}");
+
+        let docs: i64 = f.conn.query_row("SELECT count(*) FROM documents", [], |r| r.get(0)).unwrap();
+        assert_eq!(docs, 0, "nothing may be filed");
+    }
+
+    #[test]
+    fn a_future_date_is_refused() {
+        let f = Fx::new("future");
+        let id = f.stage("jpg", b"x");
+        let err = f.commit(&id, "2999-01-01", "CBC").unwrap_err();
+        assert!(err.contains("in the future"), "got: {err}");
+        assert!(err.contains("Correct the date"), "got: {err}");
+    }
+
+    #[test]
+    fn a_date_that_is_not_a_date_is_refused() {
+        let f = Fx::new("notadate");
+        let id = f.stage("jpg", b"x");
+        let err = f.commit(&id, "2026-02-31", "CBC").unwrap_err();
+        assert!(err.contains("not a real date"), "got: {err}");
+    }
+
+    #[test]
+    fn an_undated_document_is_still_allowed_past_the_birth_check() {
+        // '0000-00-00' means "unknown", not "the year zero" — it must not be
+        // compared against a date of birth.
+        let f = Fx::new("undated-ok");
+        f.conn.execute("UPDATE patients SET dob = '1992-03-09' WHERE id = ?1", params![f.patient]).unwrap();
+        let id = f.stage("jpg", b"x");
+        assert!(f.commit(&id, "0000-00-00", "Prescription").is_ok());
     }
 
     #[test]

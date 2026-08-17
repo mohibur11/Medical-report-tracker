@@ -279,6 +279,62 @@ export function bestDate(text: string, opts: RankOptions = {}): DateCandidate | 
   return top ?? null;
 }
 
+/** Which way round a purely numeric date is written. */
+export type DateOrder = 'dmy' | 'mdy';
+
+/**
+ * A numeric date whose first two parts are both 12 or less can be read either
+ * way round, and the two readings are different days. `04-07-2026` is 4 July to
+ * most of the world and 7 April to an American lab.
+ *
+ * The app cannot silently pick one. It guesses, then says it guessed.
+ */
+export function isAmbiguousOrder(raw: string): boolean {
+  const m = /^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})$/.exec(raw.trim());
+  if (!m) return false; // textual months and ISO are unambiguous by construction
+  const [, a, b] = m;
+  const first = Number(a);
+  const second = Number(b);
+  return first >= 1 && first <= 12 && second >= 1 && second <= 12 && first !== second;
+}
+
+/**
+ * Work out which order a page uses, from the dates on it that cannot be read two
+ * ways.
+ *
+ * A page that also contains `28/11/2024` has settled the question for every other
+ * date on it: 28 cannot be a month. This resolves most ambiguity without asking
+ * anyone anything, and it is why the whole page is inspected rather than each
+ * date in isolation.
+ */
+export function inferDateOrder(text: string): DateOrder | null {
+  let dmy = 0;
+  let mdy = 0;
+
+  const re = /\b(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const first = Number(m[1]);
+    const second = Number(m[2]);
+    if (first > 12 && second <= 12) dmy++;
+    else if (second > 12 && first <= 12) mdy++;
+  }
+
+  if (dmy === 0 && mdy === 0) return null;
+  if (dmy === mdy) return null; // genuinely mixed; do not guess
+  return dmy > mdy ? 'dmy' : 'mdy';
+}
+
+/** Read a raw numeric date the other way round, for offering as the alternative. */
+export function swapOrder(raw: string, today = new Date()): string | null {
+  const m = /^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})$/.exec(raw.trim());
+  if (!m) return null;
+  const [, a, b, c] = m;
+  if (a === undefined || b === undefined || c === undefined) return null;
+  // Deliberately reversed: month first, day second.
+  return iso(expandYear(+c, today), +a, +b);
+}
+
 /** Display form. The UI always shows DD/MM/YYYY; only the disk and DB are ISO. */
 export function formatDmy(isoDate: string): string {
   const [y, m, d] = isoDate.split('-');
