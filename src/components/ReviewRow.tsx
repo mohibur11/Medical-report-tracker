@@ -1,9 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import { Thumb } from './Thumb.tsx';
-import { parseDmyInput } from '../lib/extract/dates.ts';
+import { formatDmy, parseDmyInput, rankDateCandidates, type DateCandidate } from '../lib/extract/dates.ts';
 import { buildName } from '../lib/naming/sanitize.ts';
-import { commitItem, type IngestItem, type Patient } from '../lib/ipc.ts';
+import { commitItem, runOcr, type IngestItem, type Patient } from '../lib/ipc.ts';
 
 /**
  * One row of the review queue: confirm what this file is, then file it.
@@ -32,6 +32,37 @@ export function ReviewRow({
   const [docType, setDocType] = useState('report');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reading, setReading] = useState(false);
+  const [candidates, setCandidates] = useState<DateCandidate[]>([]);
+
+  /**
+   * Read the page and pre-fill the date.
+   *
+   * Recognition is not the hard part — a lab report carries four to six dates and
+   * the dominant failure is picking the wrong one. So every candidate is kept and
+   * offered as a chip: the winner is a suggestion, not an answer, and correcting
+   * it is one click rather than retyping.
+   */
+  useEffect(() => {
+    if (item.fileKind === 'pdf' || item.status === 'failed' || item.status === 'duplicate') return;
+    let alive = true;
+    setReading(true);
+    runOcr(item.id).then(
+      (page) => {
+        if (!alive) return;
+        setReading(false);
+        const ranked = rankDateCandidates(page.text);
+        setCandidates(ranked);
+        // Only pre-fill an untouched field — never overwrite typing.
+        const top = ranked[0];
+        if (top) setDate((current) => current || formatDmy(top.iso));
+      },
+      () => alive && setReading(false),
+    );
+    return () => {
+      alive = false;
+    };
+  }, [item.id, item.fileKind, item.status]);
 
   const iso = parseDmyInput(date);
   const patient = patients.find((p) => p.id === patientId);
@@ -138,6 +169,34 @@ export function ReviewRow({
             {busy ? 'Filing…' : 'File'}
           </button>
         </div>
+
+        {(reading || candidates.length > 0) && (
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px]">
+            {reading && <span className="text-slate-400">reading the page…</span>}
+            {candidates.map((c) => {
+              const chosen = iso === c.iso;
+              return (
+                <button
+                  key={c.iso}
+                  type="button"
+                  onClick={() => setDate(formatDmy(c.iso))}
+                  title={`read as "${c.raw}" — ${c.reason}`}
+                  className={`rounded border px-1.5 py-0.5 ${
+                    chosen
+                      ? 'border-sky-500 bg-sky-50 text-sky-800 dark:bg-sky-950 dark:text-sky-200'
+                      : 'border-slate-300 text-slate-600 hover:bg-slate-50 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  {formatDmy(c.iso)}
+                  {c.anchor && <span className="ml-1 opacity-60">{c.anchor}</span>}
+                </button>
+              );
+            })}
+            {!reading && candidates.length === 0 && (
+              <span className="text-slate-400">no date found — type it</span>
+            )}
+          </div>
+        )}
 
         {preview && (
           <p className="selectable mt-1.5 truncate font-mono text-[11px] text-slate-500 dark:text-slate-400">

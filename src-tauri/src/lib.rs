@@ -7,6 +7,7 @@ mod export;
 mod imaging;
 mod ingest;
 mod naming;
+mod ocr;
 mod patients;
 mod paths;
 mod reconcile;
@@ -92,6 +93,19 @@ fn commit_item(
             doc_type: &doc_type,
         },
     )
+}
+
+/// Recognise text on a staged file. Returns what was read; ranking the dates out
+/// of it happens in the review grid, where the user can see and correct the choice.
+#[tauri::command]
+async fn run_ocr(state: State<'_, Db>, ingest_id: String) -> Result<ocr::OcrPage, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    ocr::recognize_staged(&conn, &ingest_id)
+}
+
+#[tauri::command]
+fn ocr_available() -> bool {
+    ocr::available()
 }
 
 #[derive(serde::Serialize)]
@@ -435,6 +449,8 @@ pub fn run() {
             rescan_vault,
             trash_document,
             backup_now,
+            run_ocr,
+            ocr_available,
             lock_state,
             unlock,
             set_password,

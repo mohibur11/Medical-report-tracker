@@ -71,6 +71,27 @@ export const createPatient = (displayName: string, dob?: string): Promise<Patien
   invoke('create_patient', { displayName, dob: dob || null });
 
 /** Move a staged file into the vault under its canonical name. */
+export interface OcrWord {
+  text: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface OcrPage {
+  /** Reading-order text. Layout is flattened; use `words` when geometry matters. */
+  text: string;
+  words: OcrWord[];
+  engine: string;
+  millis: number;
+}
+
+/** Recognise text on a staged file. Ranking the dates happens in the review grid. */
+export const runOcr = (ingestId: string): Promise<OcrPage> => invoke('run_ocr', { ingestId });
+
+export const ocrAvailable = (): Promise<boolean> => invoke('ocr_available');
+
 export interface LockState {
   enabled: boolean;
   email: string;

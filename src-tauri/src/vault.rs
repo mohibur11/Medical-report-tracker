@@ -174,14 +174,14 @@ pub fn commit(
     vault_root: &Path,
     req: CommitRequest<'_>,
 ) -> Result<CommittedDocument, String> {
-    let (staged_path, file_kind, sha256, byte_size, orientation): (
-        Option<String>, String, Option<String>, i64, Option<i64>,
+    let (staged_path, file_kind, sha256, byte_size, orientation, page_count): (
+        Option<String>, String, Option<String>, i64, Option<i64>, Option<i64>,
     ) = conn
         .query_row(
-            "SELECT staged_path, file_kind, sha256, byte_size, exif_orientation
+            "SELECT staged_path, file_kind, sha256, byte_size, exif_orientation, page_count
              FROM ingest_items WHERE id = ?1",
             params![req.ingest_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
         )
         .map_err(|e| format!("no such staged item: {e}"))?;
 
@@ -230,7 +230,7 @@ pub fn commit(
            (id, owner_user_id, patient_id, doc_date, date_source, title, doc_type,
             page_count, rel_path, sha256, byte_size, file_kind, exif_orientation,
             created_at, updated_at)
-         VALUES (?1,?2,?3,?4,'manual',?5,?6,1,?7,?8,?9,?10,?11, datetime('now'), datetime('now'))",
+         VALUES (?1,?2,?3,?4,'manual',?5,?6,?7,?8,?9,?10,?11,?12, datetime('now'), datetime('now'))",
         params![
             doc_id,
             user_id,
@@ -238,6 +238,7 @@ pub fn commit(
             req.doc_date,
             req.title,
             req.doc_type,
+            page_count.unwrap_or(1).max(1),
             built.rel_path,
             sha256,
             byte_size,
@@ -255,6 +256,24 @@ pub fn commit(
         params![req.ingest_id, doc_id, req.patient_id, req.doc_date, req.title],
     )
     .map_err(|e| format!("cannot close ingest item: {e}"))?;
+
+    // Carry any recognised text across, so it becomes searchable with the
+    // document rather than being stranded on the staging row.
+    let ocr_text: Option<String> = conn
+        .query_row(
+            "SELECT ocr_text FROM ingest_items WHERE id = ?1",
+            params![req.ingest_id],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+    if let Some(text) = ocr_text.filter(|t| !t.trim().is_empty()) {
+        let _ = conn.execute(
+            "INSERT OR REPLACE INTO document_page (document_id, page_no, ocr_text)
+             VALUES (?1, 1, ?2)",
+            params![doc_id, text],
+        );
+    }
 
     // Searchable immediately. A failure here must not undo a filed document —
     // the index is rebuildable, the file move is not.

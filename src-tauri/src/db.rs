@@ -16,6 +16,7 @@ use serde::Serialize;
 const MIGRATIONS: &[(i64, &str)] = &[
     (1, include_str!("../../db/migrations/001_init.sql")),
     (2, include_str!("../../db/migrations/002_fts.sql")),
+    (3, include_str!("../../db/migrations/003_ingest_ocr.sql")),
 ];
 
 pub struct Db(pub Mutex<Connection>);

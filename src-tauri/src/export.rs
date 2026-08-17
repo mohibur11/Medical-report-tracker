@@ -98,7 +98,7 @@ struct Doc {
 
 /// Locate the bundled pdfcpu. Tauri copies `externalBin` next to the executable,
 /// both in dev builds and in the installed app.
-fn pdfcpu_path() -> Result<PathBuf, String> {
+pub fn pdfcpu_path() -> Result<PathBuf, String> {
     if let Ok(p) = std::env::var("PDFCPU_PATH") {
         let p = PathBuf::from(p);
         if p.exists() {
@@ -318,7 +318,7 @@ fn recode(src: &Path, dst: &Path, long_edge: u32, quality: u8, grayscale: bool) 
     Ok(())
 }
 
-fn page_count(exe: &Path, pdf: &Path) -> u32 {
+pub fn page_count(exe: &Path, pdf: &Path) -> u32 {
     run_pdfcpu(exe, &["info", "--json", &pdf.to_string_lossy()])
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())

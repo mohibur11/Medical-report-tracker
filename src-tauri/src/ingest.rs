@@ -62,6 +62,8 @@ pub struct IngestItem {
     pub byte_size: i64,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// Real page count for PDFs, from pdfcpu. Images are always one page.
+    pub page_count: Option<u32>,
     pub exif_orientation: Option<u16>,
     /// True when the pixels had to be rewritten. Surfaced in the grid because it is
     /// the difference between an upright export and a sideways one.
@@ -137,6 +139,7 @@ fn stage_one(
         byte_size: 0,
         width: None,
         height: None,
+        page_count: None,
         exif_orientation: None,
         orientation_baked: false,
         thumb_path: None,
@@ -224,6 +227,11 @@ fn stage_one(
             let _ = persist(conn, user_id, &item, None);
             return item;
         }
+        // Ask pdfcpu how many pages there really are. Assuming one made a 12-page
+        // scanned report claim to be a single page everywhere it was shown.
+        if let Ok(exe) = crate::export::pdfcpu_path() {
+            item.page_count = Some(crate::export::page_count(&exe, &staged_path));
+        }
     }
 
     // Extraction has not run yet, so the date is unknown. For handwritten
@@ -242,8 +250,8 @@ fn persist(
     conn.execute(
         "INSERT INTO ingest_items
            (id, owner_user_id, batch_id, src_path, staged_path, status, error,
-            file_kind, sha256, byte_size, exif_orientation, created_at, updated_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11, datetime('now'), datetime('now'))",
+            file_kind, sha256, byte_size, page_count, exif_orientation, created_at, updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12, datetime('now'), datetime('now'))",
         params![
             item.id,
             user_id,
@@ -255,6 +263,7 @@ fn persist(
             serde_json::to_string(&item.file_kind).unwrap_or_default().trim_matches('"'),
             item.sha256,
             item.byte_size,
+            item.page_count,
             item.exif_orientation,
         ],
     )
@@ -442,6 +451,51 @@ mod tests {
         assert_eq!(items[1].status, IngestStatus::Failed);
         assert_eq!(items[2].status, IngestStatus::NeedsDate);
         assert!(items[2].orientation_baked, "orientation 3 must still be baked");
+    }
+
+    #[test]
+    fn a_multi_page_pdf_reports_its_real_page_count() {
+        // Assuming one made a 12-page scanned report claim to be a single page
+        // everywhere it was displayed.
+        let f = Fixture::new("pages");
+        std::env::set_var(
+            "PDFCPU_PATH",
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("binaries")
+                .join("pdfcpu-x86_64-pc-windows-msvc.exe"),
+        );
+
+        // Build a genuine 3-page PDF with pdfcpu itself.
+        let exe = crate::export::pdfcpu_path().unwrap();
+        let mut pages = Vec::new();
+        for i in 0..3 {
+            let img = f.dir.join(format!("p{i}.jpg"));
+            let mut bytes = Vec::new();
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(60, 80, image::Rgb([200, 200, 200])))
+                .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Jpeg)
+                .unwrap();
+            std::fs::write(&img, bytes).unwrap();
+            let page = f.dir.join(format!("p{i}.pdf"));
+            std::process::Command::new(&exe)
+                .args(["import", "f:A4, pos:c", &page.to_string_lossy(), &img.to_string_lossy()])
+                .output().unwrap();
+            pages.push(page.to_string_lossy().to_string());
+        }
+        let merged = f.dir.join("three.pdf");
+        let mut args = vec!["merge".to_string(), merged.to_string_lossy().to_string()];
+        args.extend(pages);
+        std::process::Command::new(&exe).args(&args).output().unwrap();
+
+        let items = f.stage(&[merged.to_string_lossy().to_string()]);
+        assert_eq!(items[0].file_kind, FileKind::Pdf);
+        assert_eq!(items[0].page_count, Some(3));
+    }
+
+    #[test]
+    fn an_image_is_always_one_page() {
+        let f = Fixture::new("onepage");
+        let src = f.write("x.jpg", &jpeg_with_orientation(80, 60, 1));
+        assert_eq!(f.stage(&[src])[0].page_count, None, "images carry no page count of their own");
     }
 
     #[test]

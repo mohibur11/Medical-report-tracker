@@ -47,6 +47,20 @@ base64 = "0.22"
 unicode-normalization = "0.1"
 unicode-segmentation = "1"
 
+# Windows.Media.Ocr — the recognizer already built into Windows 10/11. Zero bundle
+# cost and fully offline. Measured in the Phase 0 spike at ~350 ms per A4 page.
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.58"
+features = [
+  "Foundation",
+  "Foundation_Collections",
+  "Globalization",
+  "Graphics_Imaging",
+  "Media_Ocr",
+  "Storage",
+  "Storage_Streams",
+]
+
 [profile.release]
 codegen-units = 1
 lto = true
