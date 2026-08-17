@@ -181,6 +181,8 @@ else {
 
 $out = Join-Path (Split-Path $PSScriptRoot -Parent) 'spikes\out\ocr-result.json'
 New-Item -ItemType Directory -Force (Split-Path $out) | Out-Null
-$results | ConvertTo-Json -Depth 4 | Set-Content -Path $out -Encoding utf8
+# WriteAllText with an explicit no-BOM encoding: PowerShell 5.1's -Encoding utf8
+# emits a byte-order mark, and a BOM makes the file invalid JSON to strict parsers.
+[System.IO.File]::WriteAllText($out, ($results | ConvertTo-Json -Depth 4), (New-Object System.Text.UTF8Encoding($false)))
 Write-Host ""
 Write-Host "wrote $out"

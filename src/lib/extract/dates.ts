@@ -24,29 +24,50 @@ export interface DateCandidate {
   index: number;
   /** The label found immediately before this date, if any. */
   anchor: string | null;
+  /** How much that label was worth. A bare "date" is weak evidence; "sample
+   *  collected" is strong. Kept so downstream rules can tell them apart. */
+  anchorWeight: number;
   score: number;
   /** Human-readable justification, shown in the grid tooltip. */
   reason: string;
 }
 
-/** Labels that mark the date a report is ABOUT. Ordered strongest first. */
+/**
+ * Labels that mark the date a report is ABOUT. Ordered strongest first.
+ *
+ * Drawn from real documents rather than guessed: Bangladeshi and Thai hospital
+ * reports, pathology reports, radiology reports, visit slips and receipts.
+ */
 const POSITIVE_ANCHORS: Array<[RegExp, number, string]> = [
-  [/\b(sample\s*(collected|collection)|collected\s*on|collection\s*date|drawn)\b/i, 100, 'sample collected'],
+  [/\b(sample\s*(collected|collection)|collected\s*(on|date)?|collection\s*date|drawn)\b/i, 100, 'sample collected'],
   [/\b(specimen|sampling)\s*(date|on)?\b/i, 90, 'specimen date'],
-  [/\b(received|recd)\b/i, 60, 'received'],
-  [/\b(report(ed)?\s*(on|date)?|result\s*date)\b/i, 45, 'reported'],
-  [/\b(registered|registration|admitted|visit|consultation)\b/i, 35, 'registered/visit'],
+  // Radiology reports label the study itself this way, and it beats the date the
+  // report was typed up or handed over.
+  [/\b(exam|study|scan|imaging|procedure)\s*date\b/i, 85, 'exam date'],
+  [/\b(date\s*of\s*(operation|procedure|surgery))\b/i, 80, 'operation date'],
+  [/\b(received|recd|receiv(ed)?\s*date)\b/i, 60, 'received'],
+  [/\b(report(ed)?\s*(on|date)?|result\s*date|date\s*of\s*report)\b/i, 45, 'reported'],
+  [/\b(requested\s*date|date\s*requested|ordered\s*(on|date))\b/i, 40, 'requested'],
+  [/\b(registered|registration|admitted|visit|consultation|en\s*date)\b/i, 35, 'registered/visit'],
+  // The report was handed over after it was produced, so this loses to almost
+  // anything else that identifies the study itself.
+  [/\b(delivery\s*date|delivered)\b/i, 25, 'delivered'],
   [/\b(date)\b/i, 15, 'generic "date"'],
 ];
 
 /** Labels that mark a date the report is NOT about. A wrong pick here is the
  *  single most damaging silent failure in the app. */
 const NEGATIVE_ANCHORS: Array<[RegExp, number, string]> = [
-  [/\b(date\s*of\s*birth|d\.?o\.?b\.?|born)\b/i, -400, 'date of birth'],
+  // "Birth Date" as well as "Date of Birth": real radiology sheets use the former,
+  // and missing it filed a 2026 scan under 1994 in the accuracy run.
+  [/\b(date\s*of\s*birth|birth\s*date|d\.?o\.?b\.?|born)\b/i, -400, 'date of birth'],
   [/\b(age)\b/i, -200, 'age field'],
   [/\b(printed?\s*(on|date)?|print\s*time)\b/i, -120, 'printed on'],
   [/\b(expiry|expires|valid\s*(till|until)|due)\b/i, -150, 'expiry'],
   [/\b(next\s*(visit|appointment|follow\s*up))\b/i, -150, 'next appointment'],
+  // Form revision stamps, e.g. "F/M-CAS-012.1 Rev.0 (15 Dec 2017)" in the footer
+  // of hospital receipts — a real date, and never the document's own.
+  [/\b(rev\.?\s*\d*|revision|form\s*no|version)\b/i, -200, 'form revision'],
 ];
 
 /** How far back to look for a label. Long enough to clear "Sample Collected : ",
@@ -89,8 +110,19 @@ function iso(y: number, m: number, d: number): string | null {
   return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
 }
 
-function anchorFor(text: string, index: number): { label: string | null; weight: number; why: string } {
-  const window = text.slice(Math.max(0, index - ANCHOR_WINDOW), index);
+/**
+ * The label for a date is the text immediately before it — but only as far back
+ * as the previous date. A label belongs to the value that follows it, so reading
+ * past an earlier date would let "Birth Date" in "Birth Date 09-03-1992 Exam Date
+ * 11-05-2026" condemn both of them.
+ */
+function anchorFor(
+  text: string,
+  index: number,
+  previousEnd = 0,
+): { label: string | null; weight: number; why: string } {
+  const start = Math.max(previousEnd, index - ANCHOR_WINDOW);
+  const window = text.slice(start, index);
 
   // Negatives win ties: a date labelled both "Date" and "of Birth" is a DOB.
   for (const [re, weight, why] of NEGATIVE_ANCHORS) {
@@ -103,12 +135,28 @@ function anchorFor(text: string, index: number): { label: string | null; weight:
 }
 
 export interface RankOptions {
-  /** Hard-reject any candidate equal to a known patient DOB. The strongest
-   *  available signal, and it costs one comparison. */
-  patientDob?: string | null;
+  /** Hard-reject candidates equal to a known date of birth. The strongest
+   *  available signal, and it costs one comparison. Accepts several because a
+   *  document can name more than one person. */
+  patientDob?: string | string[] | null;
   /** Injected so ranking is deterministic in tests. */
   today?: Date;
 }
+
+/**
+ * A candidate this many years older than the newest date on the page, with no
+ * label vouching for it, is treated as biographical rather than clinical.
+ *
+ * Real radiology sheets lay labels and values out in separate columns, which OCR
+ * flattens into "Patient Name Birth Date Gender ... 09-03-1992 ... 11-05-2026".
+ * Proximity cannot associate the label with its value there, but the age gap
+ * still can: a report is filed near when it is created, so the decades-old date
+ * beside recent content is a birth date.
+ */
+const STALE_YEARS = 10;
+
+/** The weakest anchor that counts as a real label rather than an incidental word. */
+const STRONG_ANCHOR = 35;
 
 /**
  * Find every date-shaped string and rank it by how likely it is to be the date
@@ -118,7 +166,11 @@ export interface RankOptions {
 export function rankDateCandidates(text: string, opts: RankOptions = {}): DateCandidate[] {
   const today = opts.today ?? new Date();
   const todayIso = today.toISOString().slice(0, 10);
-  const seen = new Map<string, DateCandidate>();
+  const dobs = typeof opts.patientDob === 'string'
+    ? [opts.patientDob]
+    : (opts.patientDob ?? []);
+  /** Every date-shaped match with where it sits, before any scoring. */
+  const raws: Array<{ iso: string; raw: string; index: number; end: number }> = [];
 
   for (const { re, kind } of PATTERNS) {
     re.lastIndex = 0;
@@ -154,27 +206,60 @@ export function rankDateCandidates(text: string, opts: RankOptions = {}): DateCa
       // Hard rejections — these are never the answer, whatever the label says.
       if (y < MIN_YEAR) continue;
       if (value > todayIso) continue;
-      if (opts.patientDob && value === opts.patientDob) continue;
+      if (dobs.includes(value)) continue;
 
-      const { label, weight, why } = anchorFor(text, m.index);
-
-      // A date appearing under several labels keeps its best evidence.
-      const prev = seen.get(value);
-      const score = weight + positionBonus(m.index, text.length);
-      if (prev && prev.score >= score) continue;
-
-      seen.set(value, {
-        iso: value,
-        raw: m[0],
-        index: m.index,
-        anchor: label,
-        score,
-        reason: why,
-      });
+      raws.push({ iso: value, raw: m[0], index: m.index, end: m.index + m[0].length });
     }
   }
 
-  return [...seen.values()].sort((a, b) => b.score - a.score || a.index - b.index);
+  // Left to right, longest first where two patterns start together.
+  raws.sort((a, b) => a.index - b.index || b.raw.length - a.raw.length);
+
+  const seen = new Map<string, DateCandidate>();
+  let previousEnd = 0;
+
+  for (const r of raws) {
+    // Two patterns can match the same region; the first one wins and the
+    // overlapping remainder is not a separate date.
+    if (r.index < previousEnd) continue;
+
+    const { label, weight, why } = anchorFor(text, r.index, previousEnd);
+    previousEnd = r.end;
+
+    // A date appearing under several labels keeps its best evidence.
+    const score = weight + positionBonus(r.index, text.length);
+    const prev = seen.get(r.iso);
+    if (prev && prev.score >= score) continue;
+
+    seen.set(r.iso, {
+      iso: r.iso,
+      raw: r.raw,
+      index: r.index,
+      anchor: label,
+      anchorWeight: weight,
+      score,
+      reason: why,
+    });
+  }
+
+  const found = [...seen.values()];
+
+  // Penalise a candidate that is much older than everything else on the page and
+  // has no label vouching for it. This is what catches a date of birth when the
+  // layout puts its label out of reach of proximity matching.
+  const newestYear = found.reduce((max, c) => Math.max(max, Number(c.iso.slice(0, 4))), 0);
+  for (const c of found) {
+    const gap = newestYear - Number(c.iso.slice(0, 4));
+    // A bare "date" nearby is not evidence that a decades-old value is the
+    // document's own date — only a specific label like "collected" or "reported"
+    // is. Without that, the age gap decides.
+    if (gap >= STALE_YEARS && c.anchorWeight < STRONG_ANCHOR) {
+      c.score -= 300;
+      c.reason = `${c.reason}; ${gap} years older than the rest of the page`;
+    }
+  }
+
+  return found.sort((a, b) => b.score - a.score || a.index - b.index);
 }
 
 /** Report metadata clusters in the header. A late date is more likely a footer

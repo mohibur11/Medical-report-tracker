@@ -114,6 +114,76 @@ test('expiry and next-appointment dates do not win', () => {
   assert.equal(bestDate(text, { today: TODAY })?.iso, '2026-03-14');
 });
 
+/**
+ * The following cases come from measuring the ranker against real scanned
+ * records — Bangladeshi and Thai hospital reports, pathology reports, visit slips
+ * and receipts. Each one is a failure that actually occurred, reduced to the
+ * shape that caused it. Personal details are replaced; the structure is not.
+ */
+
+test('"Birth Date" is recognised as firmly as "Date of Birth"', () => {
+  // A real radiology sheet used this wording, and the original regex only knew
+  // the other one — so a recent scan was filed under the patient's birth year.
+  const r = rankDateCandidates('Birth Date 09-03-1992 Exam Date 11-05-2026', { today: TODAY });
+  assert.equal(r[0]?.iso, '2026-05-11');
+
+  // It is demoted rather than dropped: only hard rejections (pre-1990, future, a
+  // known patient DOB) remove a candidate. Everything else stays available as a
+  // chip, because a wrong guess must be one click to correct.
+  const dob = r.find((c) => c.iso === '1992-03-09');
+  assert.equal(dob?.anchor, 'date of birth');
+  assert.ok(dob!.score < 0, 'a labelled birth date must score below zero');
+  assert.equal(r.at(-1)?.iso, '1992-03-09', 'and must rank last');
+});
+
+test('a decades-old unlabelled date loses to recent content on the same page', () => {
+  // Radiology sheets lay labels and values out in separate columns, which OCR
+  // flattens: every label first, then every value. Proximity cannot pair them, so
+  // the age gap has to carry the decision.
+  const flattened =
+    'HOSPITAL Patient Name Birth Date Gender 500123 A PATIENT NAME 09-03-1992 ' +
+    'Exam Accession # Exam Date Description Operator Male Page 1 / 11-05-2026';
+  const r = rankDateCandidates(flattened, { today: TODAY });
+  assert.equal(r[0]?.iso, '2026-05-11');
+});
+
+test('a genuinely old report is not penalised when nothing newer disputes it', () => {
+  // The age-gap rule must not bury a real 2015 report just for being old.
+  const r = rankDateCandidates('Sample Collected : 12/05/2015', { today: TODAY });
+  assert.equal(r[0]?.iso, '2015-05-12');
+});
+
+test('exam and operation dates outrank the date a report was delivered', () => {
+  const r = rankDateCandidates(
+    'Received Date: 04-Jul-26 Delivery Date: 06-Jul-26',
+    { today: TODAY },
+  );
+  assert.equal(r[0]?.iso, '2026-07-04', 'the study, not the handover');
+});
+
+test('form revision stamps in a footer are not mistaken for the document date', () => {
+  // Hospital receipts carry these: "F/M-CAS-012.1 Rev.0 (15 Dec 2017)".
+  const r = rankDateCandidates(
+    'Date/Time 30 Nov 2024 / 12:52 ... F/M-CAS-013.1 Rev.0 (15 Dec 2017)',
+    { today: TODAY },
+  );
+  assert.equal(r[0]?.iso, '2024-11-30');
+});
+
+test('several dates of birth can be rejected at once', () => {
+  const r = rankDateCandidates('DOB 03/02/1987 or 21/06/1990, collected 28/11/2024', {
+    today: TODAY,
+    patientDob: ['1987-02-03', '1990-06-21'],
+  });
+  assert.equal(r[0]?.iso, '2024-11-28');
+  assert.equal(r.length, 1, 'both birth dates are hard-rejected');
+});
+
+test('DD-Mon-YY appears on real reports and must parse', () => {
+  assert.equal(rankDateCandidates('Received Date: 04-Jul-26', { today: TODAY })[0]?.iso, '2026-07-04');
+  assert.equal(rankDateCandidates('Date: 24-Dec-2025', { today: TODAY })[0]?.iso, '2025-12-24');
+});
+
 test('display format is DMY while storage stays ISO', () => {
   assert.equal(formatDmy('2026-03-14'), '14/03/2026');
   assert.equal(formatDmy('2026-03-00'), '03/2026');
