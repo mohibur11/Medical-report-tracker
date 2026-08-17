@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react';
 
-import { rescanVault, searchDocuments, type ReconcileReport, type SearchHit } from '../lib/ipc.ts';
+import {
+  backupNow,
+  rescanVault,
+  searchDocuments,
+  type ReconcileReport,
+  type SearchHit,
+} from '../lib/ipc.ts';
 import { formatDmy } from '../lib/extract/dates.ts';
 
 /**
@@ -13,6 +19,7 @@ export function VaultTools({ onRepaired }: { onRepaired: () => void }) {
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<SearchHit[] | null>(null);
   const [report, setReport] = useState<ReconcileReport | null>(null);
+  const [backup, setBackup] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -60,6 +67,17 @@ export function VaultTools({ onRepaired }: { onRepaired: () => void }) {
         >
           {busy ? 'Rescanning…' : 'Rescan vault'}
         </button>
+        <button
+          type="button"
+          onClick={() => {
+            setError(null);
+            backupNow().then(setBackup, (e: unknown) => setError(String(e)));
+          }}
+          className="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800"
+          title="Write a database snapshot and metadata sidecars into the vault. Also happens automatically when the app closes."
+        >
+          Back up now
+        </button>
         {hits && (
           <span className="text-xs text-slate-500 dark:text-slate-400">
             {hits.length} match{hits.length === 1 ? '' : 'es'}
@@ -68,6 +86,12 @@ export function VaultTools({ onRepaired }: { onRepaired: () => void }) {
       </div>
 
       {error && <p className="mt-2 text-xs text-red-600 dark:text-red-400">{error}</p>}
+
+      {backup && (
+        <p className="selectable mt-2 font-mono text-xs text-emerald-700 dark:text-emerald-400">
+          backed up → {backup}
+        </p>
+      )}
 
       {hits && hits.length > 0 && (
         <ul className="mt-2 space-y-1">

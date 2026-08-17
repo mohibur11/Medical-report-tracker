@@ -261,6 +261,11 @@ pub fn commit(
     if let Err(e) = crate::search::index_document(conn, &doc_id) {
         eprintln!("indexing {doc_id} failed: {e}");
     }
+    // The sidecar is what lets a bare folder tree be rebuilt into a library,
+    // categories and notes included. Not worth failing a filed document over.
+    if let Err(e) = crate::backup::write_sidecar(conn, vault_root, &doc_id) {
+        eprintln!("sidecar for {doc_id} failed: {e}");
+    }
 
     Ok(CommittedDocument {
         id: doc_id,
@@ -268,6 +273,50 @@ pub fn commit(
         file_name: built.file_name,
         title_truncated: built.title_truncated,
     })
+}
+
+/// Move a document to the vault's Trash folder and mark the row trashed.
+///
+/// Nothing is ever unlinked. A medical record deleted by a mis-click is not
+/// recoverable from anywhere else, so "delete" means "move somewhere obvious" and
+/// the row survives so the document can be put back.
+pub fn trash(
+    conn: &Connection,
+    user_id: &str,
+    vault_root: &Path,
+    document_id: &str,
+) -> Result<(), String> {
+    let rel_path: String = conn
+        .query_row(
+            "SELECT rel_path FROM documents
+             WHERE id = ?1 AND owner_user_id = ?2 AND trashed_at IS NULL",
+            params![document_id, user_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| "No such document.".to_string())?;
+
+    let from = vault_root.join(rel_path.replace('\\', "/"));
+    // Keep the vault-relative shape inside Trash so it is obvious where a file
+    // came from, and so two patients' identically named files cannot collide.
+    let to = vault_root.join("Trash").join(rel_path.replace('\\', "/"));
+
+    if from.exists() {
+        let journal_id = journal_intent(conn, "move", &from, &to)?;
+        move_file(&from, &to)?;
+        journal_done(conn, &journal_id)?;
+    }
+
+    crate::backup::remove_sidecar(vault_root, &rel_path);
+
+    conn.execute(
+        "UPDATE documents SET trashed_at = datetime('now'), updated_at = datetime('now')
+         WHERE id = ?1",
+        params![document_id],
+    )
+    .map_err(|e| format!("cannot trash document: {e}"))?;
+
+    let _ = crate::search::remove_document(conn, document_id);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -547,6 +596,53 @@ mod tests {
             (i.width(), i.height())
         };
         assert_eq!((w, h), (200, 400), "the filed pixels are upright, not just tagged");
+    }
+
+    #[test]
+    fn trashing_moves_the_file_and_never_unlinks_it() {
+        let f = Fx::new("trash");
+        let id = f.stage("jpg", b"a scan worth keeping");
+        let doc = f.commit(&id, "2026-03-14", "CBC").unwrap();
+
+        let original = f.vault().join("Rahim-Uddin").join("2026").join(&doc.file_name);
+        assert!(original.exists());
+
+        trash(&f.conn, &f.user, &f.vault(), &doc.id).unwrap();
+
+        assert!(!original.exists(), "the file leaves its filed location");
+        let trashed = f.vault().join("Trash").join("Rahim-Uddin").join("2026").join(&doc.file_name);
+        assert!(trashed.exists(), "and lands in Trash, not oblivion");
+        assert_eq!(std::fs::read(&trashed).unwrap(), b"a scan worth keeping");
+
+        // The row survives so the document can be restored.
+        let (count, trashed_at): (i64, Option<String>) = f.conn
+            .query_row("SELECT count(*), max(trashed_at) FROM documents WHERE id = ?1",
+                       params![doc.id], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(count, 1);
+        assert!(trashed_at.is_some());
+    }
+
+    #[test]
+    fn a_trashed_document_leaves_the_search_index_and_the_library() {
+        let f = Fx::new("trash-index");
+        let id = f.stage("jpg", b"x");
+        let doc = f.commit(&id, "2026-03-14", "Thyroid Profile").unwrap();
+        assert_eq!(crate::search::search(&f.conn, &f.user, "thyroid", 10).unwrap().len(), 1);
+
+        trash(&f.conn, &f.user, &f.vault(), &doc.id).unwrap();
+
+        assert!(crate::search::search(&f.conn, &f.user, "thyroid", 10).unwrap().is_empty());
+        assert!(crate::documents::list(&f.conn, &f.user).unwrap().is_empty());
+    }
+
+    #[test]
+    fn trashing_twice_is_refused_rather_than_moving_a_file_that_is_not_there() {
+        let f = Fx::new("trash-twice");
+        let id = f.stage("jpg", b"x");
+        let doc = f.commit(&id, "2026-03-14", "CBC").unwrap();
+
+        trash(&f.conn, &f.user, &f.vault(), &doc.id).unwrap();
+        assert!(trash(&f.conn, &f.user, &f.vault(), &doc.id).unwrap_err().contains("No such document"));
     }
 
     #[test]

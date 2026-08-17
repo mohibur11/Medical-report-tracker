@@ -17,6 +17,7 @@ import {
   listPatients,
   listYears,
   setDocumentCategories,
+  trashDocument,
   type Category,
   type DbHealth,
   type DocumentRow,
@@ -234,6 +235,17 @@ export default function App() {
                           file missing
                         </span>
                       )}
+                      <button
+                        type="button"
+                        title="Move to the vault's Trash folder — the file is not deleted"
+                        onClick={() => {
+                          if (!window.confirm(`Move '${d.title}' to Trash? The file stays in the vault's Trash folder.`)) return;
+                          trashDocument(d.id).then(refresh, (e: unknown) => setError(String(e)));
+                        }}
+                        className="text-slate-400 hover:text-red-600"
+                      >
+                        Trash
+                      </button>
                     </div>
                   </li>
                 ))}

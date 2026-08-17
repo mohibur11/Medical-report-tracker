@@ -1,3 +1,4 @@
+mod backup;
 mod categories;
 mod db;
 mod documents;
@@ -90,6 +91,33 @@ fn commit_item(
             doc_type: &doc_type,
         },
     )
+}
+
+/// Move a document to the vault's Trash folder. Nothing is unlinked.
+#[tauri::command]
+fn trash_document(
+    app: AppHandle,
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+    document_id: String,
+) -> Result<(), String> {
+    let vault_root = paths::vault_root(&app)?;
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    vault::trash(&conn, &user.0, &vault_root, &document_id)
+}
+
+/// Write a database snapshot into the vault, plus a metadata sidecar per document.
+#[tauri::command]
+fn backup_now(
+    app: AppHandle,
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+) -> Result<String, String> {
+    let vault_root = paths::vault_root(&app)?;
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let sidecars = backup::write_all_sidecars(&conn, &vault_root, &user.0)?;
+    let path = backup::snapshot(&conn, &vault_root)?;
+    Ok(format!("{} ({sidecars} sidecars)", path.display()))
 }
 
 /// Compare the vault with the database and repair what can be repaired.
@@ -307,6 +335,28 @@ pub fn run() {
 
             Ok(())
         })
+        .on_window_event(|window, event| {
+            // Snapshot on close. A backup the user has to remember to take is a
+            // backup that does not exist, and this is the single most likely bad
+            // outcome for the app — a lost disk, not an attacker.
+            if let tauri::WindowEvent::Destroyed = event {
+                let app = window.app_handle().clone();
+
+                if let (Ok(vault_root), Some(state)) = (paths::vault_root(&app), app.try_state::<Db>()) {
+                    if let Ok(conn) = state.0.lock() {
+                        match backup::snapshot(&conn, &vault_root) {
+                            Ok(p) => eprintln!("backup written to {}", p.display()),
+                            Err(e) => eprintln!("backup failed: {e}"),
+                        }
+                    }
+                }
+
+                // Exit explicitly. Closing the window otherwise leaves the process
+                // running with no window — invisible to the user, and it holds the
+                // database lock so the next launch cannot open it.
+                app.exit(0);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             db_health,
             import_files,
@@ -327,7 +377,9 @@ pub fn run() {
             document_tags,
             search_documents,
             reindex,
-            rescan_vault
+            rescan_vault,
+            trash_document,
+            backup_now
         ])
         .run(tauri::generate_context!())
         .expect("error while running Medicine Report Tracker");

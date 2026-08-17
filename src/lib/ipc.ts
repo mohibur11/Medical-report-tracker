@@ -97,6 +97,13 @@ export interface ReconcileReport {
 /** Compare the vault with the database and repair what can be repaired. */
 export const rescanVault = (): Promise<ReconcileReport> => invoke('rescan_vault');
 
+/** Move a document to the vault's Trash folder. Nothing is unlinked. */
+export const trashDocument = (documentId: string): Promise<void> =>
+  invoke('trash_document', { documentId });
+
+/** Database snapshot into the vault, plus a metadata sidecar per document. */
+export const backupNow = (): Promise<string> => invoke('backup_now');
+
 export interface Category {
   id: string;
   name: string;

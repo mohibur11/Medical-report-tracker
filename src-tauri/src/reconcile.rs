@@ -59,6 +59,14 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
             }
             walk(&path, out);
         } else if path.is_file() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Our own bookkeeping, not archive content: metadata sidecars and the
+            // database snapshot. Reporting them as strays would be noise.
+            if name.ends_with(crate::backup::SIDECAR_SUFFIX)
+                || name.starts_with(crate::backup::SNAPSHOT_NAME)
+            {
+                continue;
+            }
             out.push(path);
         }
     }
@@ -424,6 +432,23 @@ mod tests {
         assert!(r.adopted.is_empty());
         assert_eq!(r.unknown.len(), 1);
         assert!(r.unknown[0].contains("no patient with folder"));
+    }
+
+    #[test]
+    fn our_own_sidecars_and_snapshot_are_not_reported_as_strays() {
+        let mut f = Fx::new();
+        f.filed("2026", "2026-03-14_Rahim-Uddin_CBC.jpg", b"a");
+        let dir = f.vault().join("Rahim-Uddin").join("2026");
+        std::fs::write(
+            dir.join(format!("2026-03-14_Rahim-Uddin_CBC.jpg{}", crate::backup::SIDECAR_SUFFIX)),
+            b"{}",
+        ).unwrap();
+        std::fs::write(f.vault().join(crate::backup::SNAPSHOT_NAME), b"sqlite").unwrap();
+
+        let r = f.run();
+        assert_eq!(r.ok, 1);
+        assert!(r.unknown.is_empty(), "bookkeeping files must not look like strays: {:?}", r.unknown);
+        assert!(r.adopted.is_empty());
     }
 
     #[test]
