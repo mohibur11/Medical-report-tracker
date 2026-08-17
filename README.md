@@ -16,6 +16,21 @@ Windows first. Web and Android later.
 - Rust (stable, MSVC toolchain) + Visual Studio Build Tools with the C++ workload
 - WebView2 runtime — already present on Windows 11
 
+### If `npm run dev` says `cargo metadata ... program not found`
+
+Cargo is not on PATH in that terminal. Installing Rust updates the persisted user
+PATH, but a terminal keeps whatever environment it started with — and VS Code's
+integrated terminal inherits from the VS Code process, so opening a new tab in the
+same window does not help either.
+
+For the terminal you are in:
+
+```powershell
+$env:Path += ";$env:USERPROFILE\.cargo\bin"
+```
+
+Permanently: quit VS Code completely and reopen it.
+
 ## Commands
 
 ```sh
