@@ -71,6 +71,23 @@ export const createPatient = (displayName: string, dob?: string): Promise<Patien
   invoke('create_patient', { displayName, dob: dob || null });
 
 /** Move a staged file into the vault under its canonical name. */
+export interface LockState {
+  enabled: boolean;
+  email: string;
+}
+
+export const lockState = (): Promise<LockState> => invoke('lock_state');
+export const unlock = (password: string): Promise<boolean> => invoke('unlock', { password });
+
+export const setPassword = (email: string, password: string): Promise<void> =>
+  invoke('set_password', { email, password });
+
+export const changePassword = (current: string, next: string): Promise<void> =>
+  invoke('change_password', { current, next });
+
+export const disablePassword = (current: string): Promise<void> =>
+  invoke('disable_password', { current });
+
 export interface SearchHit {
   documentId: string;
   title: string;

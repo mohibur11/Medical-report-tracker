@@ -1,3 +1,4 @@
+mod auth;
 mod backup;
 mod categories;
 mod db;
@@ -91,6 +92,60 @@ fn commit_item(
             doc_type: &doc_type,
         },
     )
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LockState {
+    enabled: bool,
+    email: String,
+}
+
+#[tauri::command]
+fn lock_state(state: State<'_, Db>) -> Result<LockState, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    Ok(LockState {
+        enabled: auth::is_enabled(&conn)?,
+        email: auth::email(&conn).unwrap_or_default(),
+    })
+}
+
+#[tauri::command]
+fn unlock(state: State<'_, Db>, password: String) -> Result<bool, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    auth::verify(&conn, &password)
+}
+
+#[tauri::command]
+fn set_password(
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+    email: String,
+    password: String,
+) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    auth::set_password(&conn, &user.0, &email, &password)
+}
+
+#[tauri::command]
+fn change_password(
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+    current: String,
+    next: String,
+) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    auth::change_password(&conn, &user.0, &current, &next)
+}
+
+#[tauri::command]
+fn disable_password(
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+    current: String,
+) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    auth::disable(&conn, &user.0, &current)
 }
 
 /// Move a document to the vault's Trash folder. Nothing is unlinked.
@@ -379,7 +434,12 @@ pub fn run() {
             reindex,
             rescan_vault,
             trash_document,
-            backup_now
+            backup_now,
+            lock_state,
+            unlock,
+            set_password,
+            change_password,
+            disable_password
         ])
         .run(tauri::generate_context!())
         .expect("error while running Medicine Report Tracker");

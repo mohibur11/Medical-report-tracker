@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 
 import { CategoryManager, CategoryPicker } from './components/CategoryPicker.tsx';
 import { ExportPanel } from './components/ExportPanel.tsx';
+import { IDLE_LOCK_MS, LockScreen, LockSettings } from './components/Lock.tsx';
 import { ReviewRow } from './components/ReviewRow.tsx';
 import { Thumb } from './components/Thumb.tsx';
 import { VaultTools } from './components/VaultTools.tsx';
@@ -16,6 +17,8 @@ import {
   listDocuments,
   listPatients,
   listYears,
+  lockState,
+  type LockState,
   setDocumentCategories,
   trashDocument,
   type Category,
@@ -50,6 +53,41 @@ export default function App() {
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lock, setLock] = useState<LockState>({ enabled: false, email: '' });
+  const [locked, setLocked] = useState(false);
+
+  const refreshLock = useCallback(() => {
+    lockState().then((s) => {
+      setLock(s);
+      // Only ever lock as a result of loading state on startup; enabling the lock
+      // from settings should not throw the user out of the session they are in.
+      setLocked((was) => was || (s.enabled && !hasUnlockedThisSession.current));
+    }, () => {});
+  }, []);
+
+  const hasUnlockedThisSession = useRef(false);
+
+  useEffect(refreshLock, [refreshLock]);
+
+  // Idle auto-lock. Only meaningful when a password is actually set.
+  useEffect(() => {
+    if (!lock.enabled || locked) return;
+    let timer: number;
+    const reset = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        hasUnlockedThisSession.current = false;
+        setLocked(true);
+      }, IDLE_LOCK_MS);
+    };
+    const events = ['mousemove', 'keydown', 'mousedown', 'wheel'] as const;
+    events.forEach((e) => window.addEventListener(e, reset, { passive: true }));
+    reset();
+    return () => {
+      window.clearTimeout(timer);
+      events.forEach((e) => window.removeEventListener(e, reset));
+    };
+  }, [lock.enabled, locked]);
 
   const refresh = useCallback(() => {
     const fail = (e: unknown) => setError(String(e));
@@ -135,6 +173,19 @@ export default function App() {
   const pending = items.filter((i) => i.status === 'needs_date' || i.status === 'pending');
   const rejected = items.filter((i) => i.status === 'failed' || i.status === 'duplicate');
 
+  if (locked) {
+    return (
+      <LockScreen
+        email={lock.email}
+        onUnlocked={() => {
+          hasUnlockedThisSession.current = true;
+          setLocked(false);
+          refresh();
+        }}
+      />
+    );
+  }
+
   return (
     <div className="flex h-full flex-col bg-white text-slate-900 dark:bg-slate-950 dark:text-slate-100">
       <header className="border-b border-slate-200 px-6 py-3 dark:border-slate-800">
@@ -191,6 +242,7 @@ export default function App() {
       <main className="relative flex-1 overflow-y-auto overflow-x-hidden">
         {view === 'library' ? (
           <>
+            <LockSettings state={lock} onChanged={refreshLock} />
             <VaultTools onRepaired={refresh} />
             <div className="border-b border-slate-200 px-6 py-3 dark:border-slate-800">
               <CategoryManager categories={categories} onChanged={refresh} />

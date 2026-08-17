@@ -32,6 +32,13 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 kamadak-exif = "0.6"
 sha2 = "0.10"
 ulid = "1"
+
+# Argon2id for the app lock. Memory-hard, so a stolen database file cannot be
+# brute-forced at GPU speed — which is the only thing a local password can
+# meaningfully resist.
+argon2 = "0.5"
+password-hash = { version = "0.5", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["std"] }
 base64 = "0.22"
 
 # Filenames must be NFC-normalized (NTFS compares ordinally and does no
