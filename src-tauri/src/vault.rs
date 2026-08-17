@@ -300,19 +300,48 @@ pub fn commit(
 
     // Carry any recognised text across, so it becomes searchable with the
     // document rather than being stranded on the staging row.
-    let ocr_text: Option<String> = conn
+    let (ocr_text, ocr_json): (Option<String>, Option<String>) = conn
         .query_row(
-            "SELECT ocr_text FROM ingest_items WHERE id = ?1",
+            "SELECT ocr_text, ocr_json FROM ingest_items WHERE id = ?1",
             params![req.ingest_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .ok()
-        .flatten();
-    if let Some(text) = ocr_text.filter(|t| !t.trim().is_empty()) {
+        .unwrap_or((None, None));
+
+    // One row per page, so a hit in a twelve-page report can say which page it was
+    // on, and so page geometry stays attached to the page it belongs to.
+    let per_page: Vec<(i64, String, String)> = ocr_json
+        .as_deref()
+        .and_then(|j| serde_json::from_str::<Vec<serde_json::Value>>(j).ok())
+        .map(|pages| {
+            pages
+                .iter()
+                .enumerate()
+                .map(|(i, p)| {
+                    let page_no = p["pageNo"].as_u64().unwrap_or(i as u64 + 1) as i64;
+                    let text = p["text"].as_str().unwrap_or_default().to_string();
+                    let words = p["words"].to_string();
+                    (page_no, text, words)
+                })
+                .collect()
+        })
+        // Older staged rows predate per-page storage; fall back to the flat text.
+        .unwrap_or_else(|| {
+            ocr_text
+                .as_deref()
+                .filter(|t| !t.trim().is_empty())
+                .map(|t| vec![(1i64, t.to_string(), String::new())])
+                .unwrap_or_default()
+        });
+
+    for (page_no, text, words) in per_page {
+        if text.trim().is_empty() {
+            continue;
+        }
         let _ = conn.execute(
-            "INSERT OR REPLACE INTO document_page (document_id, page_no, ocr_text)
-             VALUES (?1, 1, ?2)",
-            params![doc_id, text],
+            "INSERT OR REPLACE INTO document_page (document_id, page_no, ocr_text, ocr_json)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![doc_id, page_no, text, words],
         );
     }
 

@@ -46,16 +46,22 @@ export function ReviewRow({
    * it is one click rather than retyping.
    */
   useEffect(() => {
-    if (item.fileKind === 'pdf' || item.status === 'failed' || item.status === 'duplicate') return;
+    if (item.status === 'failed' || item.status === 'duplicate') return;
     let alive = true;
     setReading(true);
     runOcr(item.id).then(
-      (page) => {
+      (pages) => {
         if (!alive) return;
         setReading(false);
-        setPageText(page.text);
-        const ranked = rankDateCandidates(page.text);
+
+        // Rank across the whole document. A twelve-page report carries its date
+        // on the first page, but a covering letter or a lab slip can put it
+        // anywhere, and pages are cheap to read together.
+        const text = pages.map((p) => p.text).join('\n');
+        setPageText(text);
+        const ranked = rankDateCandidates(text);
         setCandidates(ranked);
+
         // Only pre-fill an untouched field — never overwrite typing.
         const top = ranked[0];
         if (top) setDate((current) => current || formatDmy(top.iso));
@@ -65,7 +71,7 @@ export function ReviewRow({
     return () => {
       alive = false;
     };
-  }, [item.id, item.fileKind, item.status]);
+  }, [item.id, item.status]);
 
   const iso = parseDmyInput(date);
   const patient = patients.find((p) => p.id === patientId);

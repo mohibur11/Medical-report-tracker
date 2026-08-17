@@ -85,10 +85,15 @@ export interface OcrPage {
   words: OcrWord[];
   engine: string;
   millis: number;
+  /** 1-based. Images are always page 1; PDFs carry their real page number. */
+  pageNo: number;
 }
 
-/** Recognise text on a staged file. Ranking the dates happens in the review grid. */
-export const runOcr = (ingestId: string): Promise<OcrPage> => invoke('run_ocr', { ingestId });
+/**
+ * Recognise text on a staged file — one entry per page, so a multi-page scanned
+ * PDF comes back whole. Ranking the dates happens in the review grid.
+ */
+export const runOcr = (ingestId: string): Promise<OcrPage[]> => invoke('run_ocr', { ingestId });
 
 export const ocrAvailable = (): Promise<boolean> => invoke('ocr_available');
 

@@ -34,6 +34,8 @@ pub struct OcrPage {
     pub words: Vec<OcrWord>,
     pub engine: String,
     pub millis: u64,
+    /// 1-based. Images are always page 1; PDFs carry their real page number.
+    pub page_no: usize,
 }
 
 #[cfg(windows)]
@@ -116,6 +118,7 @@ pub fn recognize(path: &std::path::Path) -> Result<OcrPage, String> {
         words,
         engine: format!("Windows.Media.Ocr ({language})"),
         millis: started.elapsed().as_millis() as u64,
+        page_no: 1,
     })
 }
 
@@ -135,6 +138,105 @@ pub fn available() -> bool {
     false
 }
 
+/// Pages beyond this are not read. A 200-page hospital discharge bundle would
+/// otherwise hold up the review queue for minutes; the pages that carry the date
+/// are at the front.
+pub const MAX_PDF_PAGES: usize = 50;
+
+/// Recognise every page of a scanned PDF.
+///
+/// pdfcpu has no renderer, but it does not need one here: in a scanned PDF each
+/// page IS a single embedded image, so extracting the images gives back the pages.
+/// That covers this archive completely — every PDF in it has zero embedded fonts —
+/// and costs no extra dependency.
+///
+/// A PDF with real vector content would extract only its pictures, not its text.
+/// Such a file has a text layer to read instead, which is both faster and exact,
+/// and is the next thing worth building.
+pub fn recognize_pdf(pdf: &std::path::Path, work: &std::path::Path) -> Result<Vec<OcrPage>, String> {
+    let exe = crate::export::pdfcpu_path()?;
+    std::fs::create_dir_all(work).map_err(|e| format!("cannot create work dir: {e}"))?;
+
+    let out = std::process::Command::new(&exe)
+        .args([
+            "extract",
+            "-m",
+            "image",
+            "--force",
+            &pdf.to_string_lossy(),
+            &work.to_string_lossy(),
+        ])
+        .output()
+        .map_err(|e| format!("cannot run pdfcpu: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "cannot read pages from this PDF: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+
+    // pdfcpu names them "<stem>_<page>_img<n>.<ext>", zero-padded according to the
+    // page count, so the page number is parsed rather than assumed.
+    let mut by_page: std::collections::BTreeMap<usize, Vec<std::path::PathBuf>> =
+        std::collections::BTreeMap::new();
+
+    for entry in std::fs::read_dir(work).map_err(|e| e.to_string())?.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(page) = page_number_of(&name) else { continue };
+        by_page.entry(page).or_default().push(path);
+    }
+
+    if by_page.is_empty() {
+        return Err("no readable page images in this PDF.".into());
+    }
+
+    let mut pages = Vec::new();
+    for (page_no, mut images) in by_page.into_iter().take(MAX_PDF_PAGES) {
+        images.sort();
+        let mut text = String::new();
+        let mut words = Vec::new();
+        let mut millis = 0u64;
+        let mut engine = String::new();
+
+        for image in &images {
+            // One unreadable image must not lose the rest of the page.
+            let Ok(part) = recognize(image) else { continue };
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(&part.text);
+            words.extend(part.words);
+            millis += part.millis;
+            engine = part.engine;
+        }
+
+        pages.push(OcrPage {
+            text,
+            words,
+            engine,
+            millis,
+            page_no,
+        });
+    }
+
+    Ok(pages)
+}
+
+/// Extract the page number from a pdfcpu image filename.
+fn page_number_of(file_name: &str) -> Option<usize> {
+    // "<stem>_<page>_img<n>.<ext>" — the stem may itself contain underscores, so
+    // the page is the second-to-last underscore-separated field.
+    let stem = file_name.rsplit_once('.').map(|(s, _)| s).unwrap_or(file_name);
+    let mut parts = stem.rsplitn(3, '_');
+    let _img = parts.next()?;
+    let page = parts.next()?;
+    page.parse::<usize>().ok()
+}
+
 /// Recognise a staged file and remember the result on its ingest row.
 ///
 /// Stored rather than returned-and-forgotten so that closing the app mid-review
@@ -143,7 +245,7 @@ pub fn available() -> bool {
 pub fn recognize_staged(
     conn: &rusqlite::Connection,
     ingest_id: &str,
-) -> Result<OcrPage, String> {
+) -> Result<Vec<OcrPage>, String> {
     use rusqlite::params;
 
     let (staged, kind): (Option<String>, String) = conn
@@ -154,14 +256,25 @@ pub fn recognize_staged(
         )
         .map_err(|e| format!("no such staged item: {e}"))?;
 
-    // PDFs need their pages rasterised first, which is Phase 3's next step.
-    // Saying so beats returning empty text that looks like a failed scan.
-    if kind == "pdf" {
-        return Err("Reading text from PDFs is not implemented yet.".into());
-    }
-
     let path = staged.ok_or("that file is no longer staged")?;
-    let page = recognize(std::path::Path::new(&path))?;
+    let path = std::path::Path::new(&path);
+
+    let pages = if kind == "pdf" {
+        let work = path.with_extension("pages");
+        let result = recognize_pdf(path, &work);
+        // The extracted page images are scratch; the text is what is kept.
+        let _ = std::fs::remove_dir_all(&work);
+        result?
+    } else {
+        vec![recognize(path)?]
+    };
+
+    // One field for ranking and search, one for geometry, both keyed by page.
+    let combined = pages
+        .iter()
+        .map(|p| p.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
 
     conn.execute(
         "UPDATE ingest_items
@@ -169,13 +282,13 @@ pub fn recognize_staged(
          WHERE id = ?1",
         params![
             ingest_id,
-            page.text,
-            serde_json::to_string(&page.words).unwrap_or_default()
+            combined,
+            serde_json::to_string(&pages).unwrap_or_default()
         ],
     )
     .map_err(|e| format!("cannot store recognised text: {e}"))?;
 
-    Ok(page)
+    Ok(pages)
 }
 
 #[cfg(test)]
@@ -305,6 +418,87 @@ mod tests {
         // the top of the folder forever.
         assert!(page.text.contains("12/03/1978"), "DOB should also be read, and later rejected");
         assert!(page.text.contains("Sample Collected"), "the anchor label ranking depends on");
+    }
+
+    #[test]
+    fn page_numbers_are_parsed_from_pdfcpu_filenames() {
+        // The stem can contain underscores and the padding varies with page count,
+        // so the page is taken positionally rather than by pattern.
+        assert_eq!(page_number_of("report_1_img0.jpg"), Some(1));
+        assert_eq!(page_number_of("Medical All Documents_14_img13.jpg"), Some(14));
+        assert_eq!(page_number_of("a_b_c_07_img2.png"), Some(7), "underscores in the stem");
+        assert_eq!(page_number_of("notours.jpg"), None);
+        assert_eq!(page_number_of("scan_x_img0.jpg"), None, "page must be numeric");
+    }
+
+    /// A multi-page scanned PDF is the shape this archive is actually made of:
+    /// every PDF in it has zero embedded fonts, so each page is one image.
+    #[test]
+    fn every_page_of_a_scanned_pdf_is_read() {
+        use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
+
+        std::env::set_var(
+            "PDFCPU_PATH",
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("binaries")
+                .join("pdfcpu-x86_64-pc-windows-msvc.exe"),
+        );
+        let exe = crate::export::pdfcpu_path().unwrap();
+
+        let dir = std::env::temp_dir().join(format!("mrt-pdfocr-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Three distinct pages, so their order can be checked rather than assumed.
+        let mut parts = Vec::new();
+        for i in 1..=3 {
+            let img = dir.join(format!("src{i}.jpg"));
+            let mut bytes = Vec::new();
+            DynamicImage::ImageRgb8(RgbImage::from_pixel(500, 700, Rgb([250, 250, 250])))
+                .write_to(&mut std::io::Cursor::new(&mut bytes), ImageFormat::Jpeg)
+                .unwrap();
+            std::fs::write(&img, bytes).unwrap();
+
+            let page = dir.join(format!("p{i}.pdf"));
+            std::process::Command::new(&exe)
+                .args(["import", "f:A4, pos:c", &page.to_string_lossy(), &img.to_string_lossy()])
+                .output()
+                .unwrap();
+            parts.push(page.to_string_lossy().to_string());
+        }
+
+        let merged = dir.join("three-page-scan.pdf");
+        let mut args = vec!["merge".to_string(), merged.to_string_lossy().to_string()];
+        args.extend(parts);
+        std::process::Command::new(&exe).args(&args).output().unwrap();
+
+        let pages = recognize_pdf(&merged, &dir.join("work")).expect("should read the pages");
+        assert_eq!(pages.len(), 3, "one entry per page");
+        assert_eq!(
+            pages.iter().map(|p| p.page_no).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "pages must come back in order",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pdf_with_no_readable_pages_says_so() {
+        std::env::set_var(
+            "PDFCPU_PATH",
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("binaries")
+                .join("pdfcpu-x86_64-pc-windows-msvc.exe"),
+        );
+        let dir = std::env::temp_dir().join(format!("mrt-badpdf-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = dir.join("not-really.pdf");
+        std::fs::write(&bad, b"%PDF-1.7\nthis is not a real pdf\n").unwrap();
+
+        let err = recognize_pdf(&bad, &dir.join("work")).unwrap_err();
+        assert!(!err.is_empty(), "must explain itself rather than return empty text");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

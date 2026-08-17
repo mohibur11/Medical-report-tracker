@@ -98,7 +98,7 @@ fn commit_item(
 /// Recognise text on a staged file. Returns what was read; ranking the dates out
 /// of it happens in the review grid, where the user can see and correct the choice.
 #[tauri::command]
-async fn run_ocr(state: State<'_, Db>, ingest_id: String) -> Result<ocr::OcrPage, String> {
+async fn run_ocr(state: State<'_, Db>, ingest_id: String) -> Result<Vec<ocr::OcrPage>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     ocr::recognize_staged(&conn, &ingest_id)
 }
