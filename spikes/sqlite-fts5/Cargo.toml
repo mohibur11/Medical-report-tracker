@@ -1,0 +1,13 @@
+[package]
+name = "spike-sqlite-fts5"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# `bundled` compiles SQLite from source so the app never depends on a system
+# sqlite3.dll. `fts5` must be requested explicitly — it is NOT in the default
+# amalgamation build, and its absence is the silent failure this spike exists
+# to rule out: CREATE VIRTUAL TABLE simply errors at runtime, long after the
+# schema design has committed to full-text search.
+rusqlite = { version = "0.37", features = ["bundled"] }

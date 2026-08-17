@@ -1,0 +1,48 @@
+[package]
+name = "medicine-report-tracker"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+description = "Offline medical report vault"
+publish = false
+
+[lib]
+# Tauri v2 keeps the app in a lib so the same crate can target desktop and, later,
+# Android without duplicating the command surface.
+name = "mrt_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# `bundled` compiles SQLite from source and already defines SQLITE_ENABLE_FTS5.
+# There is NO `fts5` feature in rusqlite 0.37 — requesting one fails the build.
+# Verified against pragma_compile_options in spikes/sqlite-fts5.
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+# Image decode/encode plus EXIF. Orientation is baked into pixels at ingest because
+# no PDF library reads the tag — untreated, 20-40% of phone photos land sideways in
+# every merged export, which is the most visible "this app is broken" failure.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff", "webp"] }
+kamadak-exif = "0.6"
+sha2 = "0.10"
+ulid = "1"
+base64 = "0.22"
+
+# Filenames must be NFC-normalized (NTFS compares ordinally and does no
+# normalization of its own) and truncated on grapheme boundaries, so a cut never
+# severs a combining mark.
+unicode-normalization = "0.1"
+unicode-segmentation = "1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

@@ -1,0 +1,10 @@
+﻿import { DatabaseSync } from 'node:sqlite';
+const db = new DatabaseSync(process.argv[2], { readOnly: true });
+const ver = db.prepare('SELECT max(version) v FROM schema_migrations').get();
+console.log('schema_version :', ver.v);
+console.log('journal_mode   :', db.prepare('PRAGMA journal_mode').get().journal_mode);
+const t = db.prepare("SELECT name, type FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
+console.log('tables         :', t.filter(x=>x.type==='table').map(x=>x.name).join(', '));
+console.log('indexes        :', t.filter(x=>x.type==='index').length);
+const fts = t.filter(x=>x.name.startsWith('document_fts')).map(x=>x.name);
+console.log('fts5 objects   :', fts.join(', '));

@@ -1,0 +1,27 @@
+@import 'tailwindcss';
+
+/* The app is a dense, keyboard-driven data tool. It follows the OS theme rather
+   than imposing one, because it sits alongside Explorer all day. */
+@theme {
+  --font-sans: 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'Cascadia Mono', 'Consolas', ui-monospace, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden; /* panes scroll, the window never does */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* Text the user needs to copy — paths, patient names — opts back in. */
+.selectable {
+  -webkit-user-select: text;
+  user-select: text;
+}

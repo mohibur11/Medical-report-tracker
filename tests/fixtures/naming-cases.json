@@ -1,0 +1,93 @@
+{
+  "_comment": [
+    "Shared conformance table for the two naming implementations.",
+    "Rust      : src-tauri/src/naming.rs       (authority - owns the filesystem and the reconciler)",
+    "TypeScript: src/lib/naming/sanitize.ts    (instant preview in the review grid, no IPC per keystroke)",
+    "Both test suites read this file. A change to either implementation that is not",
+    "reflected here, or that disagrees with it, fails on both sides.",
+    "This table is deliberately plain ASCII. Cases involving invisible characters,",
+    "NFC/NFD equivalence and non-space whitespace live in each language's own suite,",
+    "where they can be written as escapes - a literal expectation in JSON cannot pin",
+    "its own normalization form, and raw control characters are not valid JSON."
+  ],
+
+  "slugs": [
+    { "kind": "patient", "input": "Rahim Uddin", "want": "Rahim-Uddin" },
+    { "kind": "patient", "input": "  Rahim  ", "want": "Rahim" },
+    { "kind": "patient", "input": "Rahim Uddin .", "want": "Rahim-Uddin" },
+    { "kind": "patient", "input": "Rahim   Uddin", "want": "Rahim-Uddin" },
+    { "kind": "patient", "input": "CON", "want": "CON_" },
+    { "kind": "patient", "input": "nul", "want": "nul_" },
+    { "kind": "patient", "input": "COM1", "want": "COM1_" },
+    { "kind": "patient", "input": "LPT9", "want": "LPT9_" },
+    { "kind": "patient", "input": "Connor", "want": "Connor" },
+    { "kind": "patient", "input": "", "want": "Unknown-Patient" },
+    { "kind": "patient", "input": "///", "want": "Unknown-Patient" },
+    { "kind": "patient", "input": "a/b\\c|d?e*f\"g", "want": "a-b-c-d-e-f-g" },
+    { "kind": "patient", "input": "Md. Rahim", "want": "Md.-Rahim" },
+
+    { "kind": "title", "input": "Thyroid Profile", "want": "Thyroid-Profile" },
+    { "kind": "title", "input": "CBC: Report <final>", "want": "CBC-Report-final" },
+    { "kind": "title", "input": "Lipid Profile...", "want": "Lipid-Profile" },
+    { "kind": "title", "input": "X-Ray  Chest   P/A", "want": "X-Ray-Chest-P-A" },
+    { "kind": "title", "input": "***", "want": "Untitled" },
+    { "kind": "title", "input": "USG of Whole Abdomen", "want": "USG-of-Whole-Abdomen" }
+  ],
+
+  "dates": [
+    { "input": "2026-03-14", "valid": true },
+    { "input": "2024-02-29", "valid": true },
+    { "input": "2026-03-00", "valid": true },
+    { "input": "0000-00-00", "valid": true },
+    { "input": "2023-02-29", "valid": false },
+    { "input": "2026-13-01", "valid": false },
+    { "input": "2026-00-14", "valid": false },
+    { "input": "14/03/2026", "valid": false },
+    { "input": "1899-01-01", "valid": false },
+    { "input": "2026-3-14", "valid": false },
+    { "input": "", "valid": false }
+  ],
+
+  "names": [
+    {
+      "date": "2026-03-14",
+      "patient": "Rahim Uddin",
+      "title": "Thyroid Profile",
+      "ext": "pdf",
+      "seq": 1,
+      "fileName": "2026-03-14_Rahim-Uddin_Thyroid-Profile.pdf"
+    },
+    {
+      "date": "2026-03-14",
+      "patient": "Rahim",
+      "title": "CBC",
+      "ext": "jpg",
+      "seq": 2,
+      "fileName": "2026-03-14_Rahim_CBC__02.jpg"
+    },
+    {
+      "date": "2026-03-14",
+      "patient": "Rahim",
+      "title": "CBC",
+      "ext": "jpg",
+      "seq": 12,
+      "fileName": "2026-03-14_Rahim_CBC__12.jpg"
+    },
+    {
+      "date": "2026-03-14",
+      "patient": "Rahim",
+      "title": "CBC",
+      "ext": "PDF",
+      "seq": 1,
+      "fileName": "2026-03-14_Rahim_CBC.pdf"
+    },
+    {
+      "date": "not-a-date",
+      "patient": "Rahim",
+      "title": "CBC",
+      "ext": "jpg",
+      "seq": 1,
+      "fileName": "0000-00-00_Rahim_CBC.jpg"
+    }
+  ]
+}
