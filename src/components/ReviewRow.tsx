@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { Thumb } from './Thumb.tsx';
 import { detectConflicts, isBlocked, type Conflict } from '../lib/extract/conflicts.ts';
 import { formatDmy, parseDmyInput, rankDateCandidates, type DateCandidate } from '../lib/extract/dates.ts';
+import { describe as describeDocument, type Suggestion } from '../lib/extract/lexicon.ts';
 import { buildName } from '../lib/naming/sanitize.ts';
 import { commitItem, runOcr, type IngestItem, type Patient } from '../lib/ipc.ts';
 
@@ -36,6 +37,7 @@ export function ReviewRow({
   const [reading, setReading] = useState(false);
   const [candidates, setCandidates] = useState<DateCandidate[]>([]);
   const [pageText, setPageText] = useState('');
+  const [titleIdeas, setTitleIdeas] = useState<Suggestion[]>([]);
 
   /**
    * Read the page and pre-fill the date.
@@ -62,9 +64,17 @@ export function ReviewRow({
         const ranked = rankDateCandidates(text);
         setCandidates(ranked);
 
-        // Only pre-fill an untouched field — never overwrite typing.
+        // Only pre-fill untouched fields — never overwrite typing.
         const top = ranked[0];
         if (top) setDate((current) => current || formatDmy(top.iso));
+
+        // Kind and title are decided together: a receipt that prints
+        // "Prescription No." is still a receipt, and must not be titled after
+        // the medicines or the lab tests it happens to list.
+        const { docType: kind, titles: ideas } = describeDocument(text);
+        setDocType((current) => (current === 'report' ? kind : current));
+        setTitleIdeas(ideas);
+        if (ideas[0]) setTitle((current) => current || ideas[0]!.title);
       },
       () => alive && setReading(false),
     );
@@ -217,6 +227,23 @@ export function ReviewRow({
             {!reading && candidates.length === 0 && (
               <span className="text-slate-400">no date found — type it</span>
             )}
+          </div>
+        )}
+
+        {titleIdeas.length > 1 && (
+          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
+            <span className="text-slate-400">or:</span>
+            {titleIdeas.slice(1).map((s) => (
+              <button
+                key={s.title}
+                type="button"
+                onClick={() => setTitle(s.title)}
+                title={`matched "${s.matched}"`}
+                className="rounded border border-slate-300 px-1.5 py-0.5 text-slate-600 hover:bg-slate-50 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-800"
+              >
+                {s.title}
+              </button>
+            ))}
           </div>
         )}
 
