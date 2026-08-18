@@ -201,6 +201,7 @@ export const updateDocument = (args: {
   docDate: string;
   title: string;
   docType: string;
+  notes: string;
 }): Promise<CommittedDocument> => invoke('update_document', args);
 
 /** Move a document to the vault's Trash folder. Nothing is unlinked. */
@@ -249,6 +250,8 @@ export interface DocumentRow {
   relPath: string;
   pageCount: number;
   byteSize: number;
+  /** What the paper does not say. Searchable, and kept in the sidecar. */
+  notes: string | null;
   missing: boolean;
 }
 
@@ -285,6 +288,37 @@ export interface ExportResult {
 
 export const exportPdf = (request: ExportRequest): Promise<ExportResult> =>
   invoke('export_pdf', { request });
+
+/**
+ * A saved set of export filters.
+ *
+ * The filters are stored, never the result — a preset opened a year from now
+ * picks up everything filed since, which is what "all thyroid reports" means to
+ * whoever asked for it.
+ */
+export interface ExportPreset {
+  id: string;
+  name: string;
+  patientIds: string[];
+  years: string[];
+  categoryIds: string[];
+  docTypes: string[];
+  preset: Preset;
+  /** null means never split. */
+  maxBytes: number | null;
+}
+
+export const listExportPresets = (): Promise<ExportPreset[]> => invoke('list_export_presets');
+
+/** Saving over an existing name replaces it. */
+export const saveExportPreset = (name: string, preset: ExportPreset): Promise<ExportPreset> =>
+  invoke('save_export_preset', { name, preset });
+
+export const deleteExportPreset = (id: string): Promise<void> =>
+  invoke('delete_export_preset', { id });
+
+/** Keeps the list ordered by habit rather than alphabet. */
+export const useExportPreset = (id: string): Promise<void> => invoke('use_export_preset', { id });
 
 export const revealInExplorer = (path: string): Promise<void> =>
   invoke('reveal_in_explorer', { path });

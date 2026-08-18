@@ -16,6 +16,8 @@ pub struct DocumentRow {
     pub rel_path: String,
     pub page_count: i64,
     pub byte_size: i64,
+    /// What the paper does not say — what was advised, what to repeat and when.
+    pub notes: Option<String>,
     /// Set by the reconciler when the file is no longer where the database says.
     /// Rows are never auto-purged — a file moved in Explorer is not a deletion.
     pub missing: bool,
@@ -25,7 +27,7 @@ pub fn list(conn: &Connection, user_id: &str) -> Result<Vec<DocumentRow>, String
     let mut stmt = conn
         .prepare(
             "SELECT d.id, d.patient_id, p.display_name, d.doc_date, d.title, d.doc_type,
-                    d.file_kind, d.rel_path, d.page_count, d.byte_size, d.missing_at
+                    d.file_kind, d.rel_path, d.page_count, d.byte_size, d.notes, d.missing_at
              FROM documents d
              JOIN patients p ON p.id = d.patient_id
              WHERE d.owner_user_id = ?1 AND d.trashed_at IS NULL
@@ -47,7 +49,8 @@ pub fn list(conn: &Connection, user_id: &str) -> Result<Vec<DocumentRow>, String
                 rel_path: r.get(7)?,
                 page_count: r.get(8)?,
                 byte_size: r.get(9)?,
-                missing: r.get::<_, Option<String>>(10)?.is_some(),
+                notes: r.get(10)?,
+                missing: r.get::<_, Option<String>>(11)?.is_some(),
             })
         })
         .map_err(|e| e.to_string())?;

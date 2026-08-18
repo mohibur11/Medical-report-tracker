@@ -34,6 +34,17 @@
     "externalBin": [
       "binaries/pdfcpu"
     ],
+    "fileAssociations": [
+      {
+        "ext": ["pdf", "jpg", "jpeg", "png", "tif", "tiff", "webp"],
+        "description": "Medical report or scan",
+        "role": "Viewer"
+      }
+    ],
+    "windows": {
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

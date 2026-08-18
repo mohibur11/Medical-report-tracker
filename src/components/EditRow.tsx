@@ -28,6 +28,7 @@ export function EditRow({
   const [title, setTitle] = useState(doc.title);
   const [patientId, setPatientId] = useState(doc.patientId);
   const [docType, setDocType] = useState(doc.docType);
+  const [notes, setNotes] = useState(doc.notes ?? '');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -68,6 +69,7 @@ export function EditRow({
         docDate: iso,
         title: title.trim(),
         docType,
+        notes,
       });
       onSaved();
     } catch (e) {
@@ -129,6 +131,18 @@ export function EditRow({
           Cancel
         </button>
       </div>
+
+      {/* Notes are not part of the filename, so they never move the file. They are
+          what the scan itself cannot say — what was advised, what to repeat and
+          when — and they are searchable and carried in the sidecar. */}
+      <textarea
+        className={`${input} mt-2 block w-full resize-y`}
+        rows={2}
+        placeholder="Notes — what the doctor said, what to repeat and when"
+        value={notes}
+        onChange={(e) => setNotes(e.target.value)}
+        aria-label="Notes"
+      />
 
       {preview && (
         <p className="selectable mt-1.5 truncate font-mono text-[11px] text-slate-500 dark:text-slate-400">

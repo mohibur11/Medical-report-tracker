@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { open } from '@tauri-apps/plugin-dialog';
 
@@ -195,6 +196,16 @@ export default function App() {
 
     return () => void pending.then((un) => un());
   }, [ingest]);
+
+  // Files can also arrive without the window being touched — opened with the app
+  // from Explorer, or handed to the running copy by a second launch.
+  useEffect(() => {
+    const pending = listen('queue-changed', () => {
+      setView('inbox');
+      refresh();
+    }).catch(() => () => {});
+    return () => void pending.then((un) => un());
+  }, [refresh]);
 
   /** The door that always works, whatever drag-and-drop is doing. */
   async function pickFiles() {
@@ -431,6 +442,14 @@ export default function App() {
                         selected={tags[d.id] ?? []}
                         onChange={(ids) => void retag(d.id, ids)}
                       />
+                      {d.notes && (
+                        <span
+                          className="max-w-72 truncate italic text-slate-500 dark:text-slate-400"
+                          title={d.notes}
+                        >
+                          {d.notes}
+                        </span>
+                      )}
                       {d.missing && (
                         <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-800 dark:bg-amber-900 dark:text-amber-200">
                           file missing

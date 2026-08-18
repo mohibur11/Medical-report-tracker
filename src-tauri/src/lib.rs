@@ -10,6 +10,7 @@ mod naming;
 mod ocr;
 mod patients;
 mod paths;
+mod presets;
 mod reconcile;
 mod search;
 mod sniff;
@@ -17,7 +18,7 @@ mod vault;
 
 use std::sync::Mutex;
 
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::db::{Db, DbHealth};
 use crate::ingest::IngestItem;
@@ -93,6 +94,44 @@ fn rename_patient(
         &display_name,
         dob.as_deref(),
     )
+}
+
+#[tauri::command]
+fn list_export_presets(
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+) -> Result<Vec<presets::ExportPreset>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    presets::list(&conn, &user.0)
+}
+
+#[tauri::command]
+fn save_export_preset(
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+    name: String,
+    preset: presets::ExportPreset,
+) -> Result<presets::ExportPreset, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    presets::save(&conn, &user.0, &name, &preset)
+}
+
+#[tauri::command]
+fn delete_export_preset(
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+    id: String,
+) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    presets::remove(&conn, &user.0, &id)
+}
+
+/// Record that a preset was used, so the list stays ordered by habit.
+#[tauri::command]
+fn use_export_preset(state: State<'_, Db>, user: State<'_, CurrentUser>, id: String) {
+    if let Ok(conn) = state.0.lock() {
+        presets::touch(&conn, &user.0, &id);
+    }
 }
 
 #[tauri::command]
@@ -234,6 +273,7 @@ fn update_document(
     doc_date: String,
     title: String,
     doc_type: String,
+    notes: Option<String>,
 ) -> Result<vault::CommittedDocument, String> {
     let vault_root = paths::vault_root(&app)?;
     let conn = state.0.lock().map_err(|e| e.to_string())?;
@@ -247,6 +287,7 @@ fn update_document(
             doc_date: &doc_date,
             title: &title,
             doc_type: &doc_type,
+            notes: notes.as_deref().unwrap_or_default(),
         },
     )
 }
@@ -439,16 +480,56 @@ fn staged_thumb(app: AppHandle, id: String) -> Result<Option<String>, String> {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Files handed to the app on the command line — by "Open with", by dropping a
+/// file on the icon, or by a second launch while one is already running.
+///
+/// Anything that is not an existing file is ignored rather than reported: the
+/// command line also carries flags, and a launch that fails because of one is
+/// worse than a launch that quietly imports nothing.
+fn stage_arguments(app: &AppHandle, argv: &[String]) -> usize {
+    let paths: Vec<String> = argv
+        .iter()
+        .skip(1)
+        .filter(|a| !a.starts_with('-'))
+        .filter(|a| std::path::Path::new(a).is_file())
+        .cloned()
+        .collect();
+
+    if paths.is_empty() {
+        return 0;
+    }
+
+    let (Ok(staging), Some(db), Some(user)) = (
+        paths::staging_dir(app),
+        app.try_state::<Db>(),
+        app.try_state::<CurrentUser>(),
+    ) else {
+        return 0;
+    };
+    let Ok(conn) = db.0.lock() else { return 0 };
+
+    match ingest::stage_batch(&conn, &user.0, &staging, &paths) {
+        Ok(items) => {
+            // The queue is read from the database, so the window only needs to be
+            // told to look again.
+            let _ = app.emit("queue-changed", items.len());
+            items.len()
+        }
+        Err(_) => 0,
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         // Must be registered before anything else: a second launch has to be
         // turned away before it opens the database, replays the journal, or
         // starts moving files the first copy is already moving.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             use tauri::Manager;
-            // Someone tried to open the app again — almost always by
-            // double-clicking the shortcut. Show them the window they already
-            // have rather than doing nothing.
+            // Someone tried to open the app again — by double-clicking the
+            // shortcut, or by sending it a file with "Open with". Show them the
+            // window they already have, and take the file rather than dropping it.
+            stage_arguments(app, &argv);
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.show();
@@ -498,6 +579,14 @@ pub fn run() {
             app.manage(Db(Mutex::new(conn)));
             app.manage(CurrentUser(user_id));
 
+            // Opened by double-clicking a scan, or by dropping files on the icon.
+            // Done after the state is managed, because staging needs both.
+            let argv: Vec<String> = std::env::args().collect();
+            match stage_arguments(handle, &argv) {
+                0 => {}
+                n => eprintln!("staged {n} file(s) from the command line"),
+            }
+
             // Debug builds open devtools automatically. Frontend failures in a
             // desktop webview are otherwise invisible — there is no address bar
             // and no console unless one is asked for.
@@ -538,6 +627,10 @@ pub fn run() {
             staged_thumb,
             list_patients,
             create_patient,
+            list_export_presets,
+            save_export_preset,
+            delete_export_preset,
+            use_export_preset,
             rename_patient,
             commit_item,
             list_documents,

@@ -120,6 +120,17 @@ The queue is stored, not remembered. Close the app halfway through a big import,
 reopen it, and the remaining files are still there with their recognised text
 intact — nothing is stranded in staging.
 
+#### Opening a scan straight from Explorer
+
+The installer registers the app for `.pdf`, `.jpg`, `.png` and friends as a
+*viewer* — it appears under **Open with**, and does not take over as the default
+for any of them.
+
+Sending a file that way imports it. If the app is already open, the second launch
+hands its file over and closes rather than starting a second copy, and the window
+jumps to the inbox with the new row already read. Worth trying with the app both
+closed and open — they are different code paths.
+
 ### 4. Library
 
 - **Search** titles, notes and recognised text. Try a word from inside a scan —
@@ -133,6 +144,10 @@ intact — nothing is stranded in staging.
   does not recognise strictly alone.
 - **Back up now** — writes a database snapshot into the vault. Also happens
   automatically when you close the app.
+- **Notes** — `Edit` on any document has a notes box. It is not part of the
+  filename, so writing one never moves the file. Notes are searchable, and they
+  are written into the `.meta.json` sidecar beside the document, which is what
+  survives if the database is ever lost.
 
 ### 4b. Correcting a patient's name or date of birth
 
@@ -163,6 +178,12 @@ on Windows, and a date of birth later than a report already filed for that patie
 
 Pick a patient, a year, a category, a quality preset, then **Create PDF**. Output
 lands in `<vault>\Exports\`.
+
+**Save these filters** keeps that combination under a name, and saved presets
+appear as chips above the filters. What is stored is the filter, not the result:
+opening "Thyroid for Dr Karim" a year from now includes everything filed since.
+A preset naming a patient or category that has since been removed still opens,
+minus that part, rather than silently matching nothing.
 
 Open it and check:
 

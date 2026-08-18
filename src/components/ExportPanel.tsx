@@ -1,9 +1,14 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
 import {
+  deleteExportPreset,
   exportPdf,
+  listExportPresets,
   revealInExplorer,
+  saveExportPreset,
+  useExportPreset,
   type Category,
+  type ExportPreset,
   type ExportResult,
   type Patient,
   type Preset,
@@ -45,6 +50,52 @@ export function ExportPanel({
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<ExportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [presets, setPresets] = useState<ExportPreset[]>([]);
+  const [applied, setApplied] = useState<string | null>(null);
+
+  const loadPresets = () => listExportPresets().then(setPresets, () => {});
+  useEffect(() => void loadPresets(), []);
+
+  /**
+   * Apply a saved filter.
+   *
+   * Ids that no longer exist are dropped rather than carried: a preset naming a
+   * patient or category that has since been removed should still open, minus
+   * that part, instead of quietly filtering everything out.
+   */
+  function apply(p: ExportPreset) {
+    setPatientIds(p.patientIds.filter((id) => patients.some((x) => x.id === id)));
+    setSelectedYears(p.years.filter((y) => years.includes(y)));
+    setCategoryIds(p.categoryIds.filter((id) => categories.some((c) => c.id === id)));
+    setPreset(p.preset);
+    setSplit(p.maxBytes !== null);
+    setApplied(p.id);
+    setResult(null);
+    void useExportPreset(p.id).then(loadPresets, () => {});
+  }
+
+  async function saveCurrent() {
+    const name = window.prompt('Save these filters as', applied
+      ? (presets.find((p) => p.id === applied)?.name ?? scope)
+      : scope);
+    if (!name) return;
+    try {
+      const saved = await saveExportPreset(name, {
+        id: '',
+        name,
+        patientIds,
+        years: selectedYears,
+        categoryIds,
+        docTypes: [],
+        preset,
+        maxBytes: split ? EMAIL_LIMIT : null,
+      });
+      setApplied(saved.id);
+      await loadPresets();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   function toggle(list: string[], value: string, set: (v: string[]) => void) {
     set(list.includes(value) ? list.filter((v) => v !== value) : [...list, value]);
@@ -104,6 +155,41 @@ export function ExportPanel({
       <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
         Export one PDF for a doctor
       </h2>
+
+      {presets.length > 0 && (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          <span className="w-20 shrink-0 text-xs text-slate-500 dark:text-slate-400">Saved</span>
+          {presets.map((p) => (
+            <span key={p.id} className="inline-flex items-center">
+              <button
+                type="button"
+                onClick={() => apply(p)}
+                className={`rounded-l border border-r-0 px-2 py-0.5 text-xs ${
+                  applied === p.id
+                    ? 'border-sky-500 bg-sky-50 text-sky-800 dark:bg-sky-950 dark:text-sky-200'
+                    : 'border-slate-300 text-slate-600 hover:bg-slate-50 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-800'
+                }`}
+              >
+                {p.name}
+              </button>
+              <button
+                type="button"
+                title={`Delete the preset ${p.name} — the documents are untouched`}
+                onClick={() => {
+                  if (!window.confirm(`Delete the preset '${p.name}'? The documents are not affected.`)) return;
+                  deleteExportPreset(p.id).then(() => {
+                    if (applied === p.id) setApplied(null);
+                    return loadPresets();
+                  }, (e: unknown) => setError(String(e)));
+                }}
+                className="rounded-r border border-slate-300 px-1.5 py-0.5 text-xs text-slate-400 hover:text-red-600 dark:border-slate-600"
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
 
       <div className="mt-3 space-y-2">
         <Field label="Patients">
@@ -187,6 +273,15 @@ export function ExportPanel({
           className="rounded bg-sky-600 px-4 py-1.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:bg-slate-300 dark:disabled:bg-slate-700"
         >
           {busy ? 'Building…' : 'Create PDF'}
+        </button>
+        {/* The same doctor asks for the same slice every time; typing it out
+            again each visit is friction on the one action that matters. */}
+        <button
+          type="button"
+          onClick={() => void saveCurrent()}
+          className="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800"
+        >
+          Save these filters
         </button>
         {documentCount === 0 && (
           <span className="text-xs text-slate-500">File some documents first.</span>

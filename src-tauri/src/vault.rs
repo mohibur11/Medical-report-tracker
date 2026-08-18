@@ -380,12 +380,17 @@ pub fn commit(
     })
 }
 
+/// Borrowed throughout, so passing it twice costs nothing.
+#[derive(Clone, Copy)]
 pub struct UpdateRequest<'a> {
     pub document_id: &'a str,
     pub patient_id: &'a str,
     pub doc_date: &'a str,
     pub title: &'a str,
     pub doc_type: &'a str,
+    /// What the paper does not say: what the doctor advised, what to repeat and
+    /// when. Searchable, and carried in the sidecar so it survives the database.
+    pub notes: &'a str,
 }
 
 /// Change a filed document's details, moving the file if its canonical name or
@@ -482,10 +487,11 @@ pub fn update(
         crate::backup::remove_sidecar(vault_root, &old_rel);
     }
 
+    let notes = req.notes.trim();
     conn.execute(
         "UPDATE documents
          SET patient_id = ?2, doc_date = ?3, title = ?4, doc_type = ?5, rel_path = ?6,
-             updated_at = datetime('now')
+             notes = ?7, updated_at = datetime('now')
          WHERE id = ?1",
         params![
             req.document_id,
@@ -494,6 +500,9 @@ pub fn update(
             title,
             req.doc_type,
             built.rel_path,
+            // Empty means absent, not an empty string, so a note that was cleared
+            // does not linger in the sidecar as "".
+            Some(notes).filter(|n| !n.is_empty()),
         ],
     )
     .map_err(|e| format!("cannot update document: {e}"))?;
@@ -875,6 +884,99 @@ mod tests {
         fn exists(&self, rel: &str) -> bool {
             self.vault().join(rel.replace('\\', "/")).exists()
         }
+    }
+
+    #[test]
+    fn a_note_is_saved_searchable_and_carried_into_the_sidecar() {
+        let f = Fx::new("notes");
+        let doc = f.commit(&f.stage("jpg", b"x"), "2025-03-14", "Thyroid Profile").unwrap();
+
+        update(
+            &f.conn,
+            &f.user,
+            &f.vault(),
+            UpdateRequest {
+                document_id: &doc.id,
+                patient_id: &f.patient,
+                doc_date: "2025-03-14",
+                title: "Thyroid Profile",
+                doc_type: "report",
+                notes: "Dr Karim said repeat in three months",
+            },
+        )
+        .unwrap();
+
+        let stored: Option<String> = f
+            .conn
+            .query_row("SELECT notes FROM documents WHERE id = ?1", params![doc.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some("Dr Karim said repeat in three months"));
+
+        // Searchable, because a note nobody can find again is not worth typing.
+        let hits = crate::search::search(&f.conn, &f.user, "repeat", 20).unwrap();
+        assert!(hits.iter().any(|h| h.document_id == doc.id), "the note should be findable");
+
+        // And in the sidecar, which is what someone reading the vault without the
+        // app — or restoring from it — actually has.
+        let sidecar = f.vault().join(format!(
+            "{}{}",
+            f.rel_path(&doc.id).replace('\\', "/"),
+            crate::backup::SIDECAR_SUFFIX
+        ));
+        assert!(std::fs::read_to_string(sidecar).unwrap().contains("repeat in three months"));
+    }
+
+    #[test]
+    fn clearing_a_note_removes_it_rather_than_storing_emptiness() {
+        let f = Fx::new("notesclear");
+        let doc = f.commit(&f.stage("jpg", b"x"), "2025-03-14", "CBC").unwrap();
+        let mut req = UpdateRequest {
+            document_id: &doc.id,
+            patient_id: &f.patient,
+            doc_date: "2025-03-14",
+            title: "CBC",
+            doc_type: "report",
+            notes: "fasting sample",
+        };
+        update(&f.conn, &f.user, &f.vault(), req).unwrap();
+
+        req.notes = "   ";
+        update(&f.conn, &f.user, &f.vault(), req).unwrap();
+
+        let stored: Option<String> = f
+            .conn
+            .query_row("SELECT notes FROM documents WHERE id = ?1", params![doc.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stored, None, "whitespace is not a note");
+        assert!(
+            crate::search::search(&f.conn, &f.user, "fasting", 20).unwrap().is_empty(),
+            "and the old note must leave the index with it",
+        );
+    }
+
+    #[test]
+    fn a_note_does_not_move_the_file() {
+        let f = Fx::new("notesmove");
+        let doc = f.commit(&f.stage("jpg", b"x"), "2025-03-14", "CBC").unwrap();
+        let before = f.rel_path(&doc.id);
+
+        update(
+            &f.conn,
+            &f.user,
+            &f.vault(),
+            UpdateRequest {
+                document_id: &doc.id,
+                patient_id: &f.patient,
+                doc_date: "2025-03-14",
+                title: "CBC",
+                doc_type: "report",
+                notes: "anything at all",
+            },
+        )
+        .unwrap();
+
+        assert_eq!(f.rel_path(&doc.id), before, "notes are not part of the filename");
+        assert!(f.exists(&before));
     }
 
     #[test]
@@ -1303,6 +1405,7 @@ mod tests {
             doc_date: "2026-03-14",
             title: "Complete Blood Count",
             doc_type: "report",
+            notes: "",
         }).unwrap();
 
         assert_eq!(updated.file_name, "2026-03-14_Rahim-Uddin_Complete-Blood-Count.jpg");
@@ -1323,6 +1426,7 @@ mod tests {
             doc_date: "2024-11-28",
             title: "CBC",
             doc_type: "report",
+            notes: "",
         }).unwrap();
 
         assert!(updated.rel_path.contains("2024"), "got {}", updated.rel_path);
@@ -1349,6 +1453,7 @@ mod tests {
             doc_date: "2026-03-14",
             title: "CBC",
             doc_type: "report",
+            notes: "",
         }).unwrap();
 
         assert_eq!(updated.file_name, "2026-03-14_Karim-Uddin_CBC.jpg");
@@ -1371,6 +1476,7 @@ mod tests {
                 doc_date: "2026-03-14",
                 title: "CBC",
                 doc_type: "report",
+                notes: "",
             }).unwrap();
             assert_eq!(u.file_name, doc.file_name, "unchanged details must not rename");
         }
@@ -1389,6 +1495,7 @@ mod tests {
             doc_date: "1985-01-01",
             title: "CBC",
             doc_type: "report",
+            notes: "",
         }).unwrap_err();
         assert!(err.contains("before"), "got: {err}");
 
@@ -1411,6 +1518,7 @@ mod tests {
             doc_date: "2026-03-14",
             title: "Thyroid Profile",
             doc_type: "report",
+            notes: "",
         }).unwrap();
 
         assert_eq!(crate::search::search(&f.conn, &f.user, "thyroid", 10).unwrap().len(), 1);
@@ -1428,6 +1536,7 @@ mod tests {
             doc_date: "2026-03-14",
             title: "   ",
             doc_type: "report",
+            notes: "",
         }).unwrap_err();
         assert!(err.contains("needs a title"), "got: {err}");
     }

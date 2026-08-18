@@ -15,6 +15,23 @@ merged-PDF export all work; recognition pre-fills the review screen. See
 
 Still open: patient rename, malformed-PDF repair, code signing.
 
+## Signing the installer
+
+The installer is unsigned, so Windows SmartScreen shows *"Windows protected your
+PC"* on first run and the publisher reads as unknown. Click **More info → Run
+anyway**. That is a nuisance for the person who built it and a genuine warning
+sign for anyone else, so it only matters once this is handed to other people.
+
+Signing is configuration, not code — everything except the certificate is already
+in `tauri.conf.json`. Set `bundle.windows.certificateThumbprint` to the thumbprint
+of a code-signing certificate in the Windows certificate store and rebuild.
+
+What it costs: an OV certificate runs roughly $200-400 a year and still
+accumulates SmartScreen reputation slowly; an EV certificate costs more, needs a
+hardware token, and carries reputation immediately. A self-signed certificate
+silences nothing for anyone but the machine that trusts it, so it is not worth
+the trouble.
+
 ## Requirements
 
 - Node 24+
