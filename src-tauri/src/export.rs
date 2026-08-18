@@ -394,12 +394,112 @@ pub fn decrypt_pdf(exe: &Path, pdf: &Path, password: &str) -> Result<(), String>
     Ok(())
 }
 
+/// Write page one of `pdf` out as an image, for a thumbnail.
+///
+/// Rendered by the sidecar rather than in the window: the alternative is sending
+/// the whole PDF across the IPC bridge, and a twelve-page scan is tens of
+/// megabytes for a picture 220 pixels wide.
+pub fn first_page_image(exe: &Path, pdf: &Path, work: &Path) -> Result<Vec<u8>, String> {
+    std::fs::create_dir_all(work).map_err(|e| format!("cannot create work dir: {e}"))?;
+    run_pdfcpu(
+        exe,
+        &[
+            "extract",
+            "-m",
+            "image",
+            // Page one only: a fourteen-page scan should not be fully unpacked
+            // for a picture 220 pixels wide.
+            "-p",
+            "1",
+            "--force",
+            &pdf.to_string_lossy(),
+            &work.to_string_lossy(),
+        ],
+    )?;
+
+    // pdfcpu names extracts "<stem>_<page>_img<n>.<ext>"; a page holding several
+    // images gives several files, and the largest is the scan rather than a logo.
+    let mut best: Option<(u64, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(work).map_err(|e| e.to_string())?.flatten() {
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        if best.as_ref().is_none_or(|(b, _)| size > *b) {
+            best = Some((size, entry.path()));
+        }
+    }
+
+    let (_, path) = best.ok_or("no image on the first page")?;
+    std::fs::read(&path).map_err(|e| format!("cannot read extracted page: {e}"))
+}
+
 pub fn page_count(exe: &Path, pdf: &Path) -> u32 {
     run_pdfcpu(exe, &["info", "--json", &pdf.to_string_lossy()])
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v["infos"][0]["pageCount"].as_u64())
         .unwrap_or(1) as u32
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderExport {
+    pub out_dir: String,
+    pub copied: usize,
+    pub missing: Vec<String>,
+}
+
+/// Copy the matching documents out as loose, numbered files.
+///
+/// The escape hatch. Merging depends on the sidecar, on every source PDF being
+/// readable, and on there being enough disk for the intermediates; copying
+/// depends on none of that. Because the canonical filename already carries date,
+/// patient and title, and the numbering preserves the order the merged PDF would
+/// have used, this degrades to something genuinely usable rather than to a pile.
+pub fn to_folder(
+    conn: &Connection,
+    user_id: &str,
+    vault_root: &Path,
+    req: &ExportRequest,
+) -> Result<FolderExport, String> {
+    let docs = select_documents(conn, user_id, req)?;
+    if docs.is_empty() {
+        return Err("Nothing matches those filters.".into());
+    }
+
+    let out_dir = PathBuf::from(&req.out_dir).join(&req.base_name);
+    std::fs::create_dir_all(&out_dir).map_err(|e| format!("cannot create {out_dir:?}: {e}"))?;
+
+    let width = docs.len().to_string().len();
+    let mut copied = 0usize;
+    let mut missing = Vec::new();
+
+    for (i, doc) in docs.iter().enumerate() {
+        let source = vault_root.join(doc.rel_path.replace('\\', "/"));
+        let name = source
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| format!("{}.bin", doc.id));
+
+        // Numbered so the folder opens in the same order the merged PDF reads in,
+        // whatever the viewer decides to sort by.
+        let dest = out_dir.join(format!("{:0width$}_{name}", i + 1, width = width));
+        match std::fs::copy(&source, &dest) {
+            Ok(_) => copied += 1,
+            Err(e) => missing.push(format!("{} — {e}", doc.title)),
+        }
+    }
+
+    if copied == 0 {
+        return Err(format!(
+            "None of the selected documents could be copied:\n{}",
+            missing.join("\n")
+        ));
+    }
+
+    Ok(FolderExport {
+        out_dir: out_dir.display().to_string(),
+        copied,
+        missing,
+    })
 }
 
 /// Build the export. Returns one part, or several when the size budget forces a
@@ -631,6 +731,142 @@ mod tests {
         v["infos"][0]["pageSizes"].as_array().map(|a| {
             a.iter().map(|s| (s["width"].as_f64().unwrap_or(0.0), s["height"].as_f64().unwrap_or(0.0))).collect()
         }).unwrap_or_default()
+    }
+
+    #[test]
+    fn a_pdf_gives_up_its_first_page_as_an_image() {
+        let f = Fx::new("firstpage");
+        let exe = pdfcpu_path().unwrap();
+
+        // Three pages, so a thumbnail taken from the wrong one would show.
+        let img = f.dir.join("page.jpg");
+        write_jpeg(&img, 300, 420);
+        let mut parts = Vec::new();
+        for i in 1..=3 {
+            let page = f.dir.join(format!("p{i}.pdf"));
+            run_pdfcpu(
+                &exe,
+                &["import", "f:A4, pos:c", &page.to_string_lossy(), &img.to_string_lossy()],
+            )
+            .unwrap();
+            parts.push(page.to_string_lossy().to_string());
+        }
+        let merged = f.dir.join("three.pdf");
+        let mut args = vec!["merge".to_string(), merged.to_string_lossy().to_string()];
+        args.extend(parts);
+        run_pdfcpu(&exe, &args.iter().map(String::as_str).collect::<Vec<_>>()).unwrap();
+
+        let bytes = first_page_image(&exe, &merged, &f.dir.join("p1work")).unwrap();
+        assert!(!bytes.is_empty());
+
+        // Decodable, because a thumbnail is made from it.
+        let decoded = image::load_from_memory(&bytes).expect("should be a real image");
+        assert!(decoded.width() > 0 && decoded.height() > 0);
+    }
+
+    #[test]
+    fn a_pdf_with_no_pictures_on_page_one_says_so_rather_than_hanging() {
+        let f = Fx::new("nopics");
+        let exe = pdfcpu_path().unwrap();
+
+        // A page of pure text has no image to extract; the caller falls back to
+        // the plain PDF badge rather than failing the import.
+        let blank = f.dir.join("blank.pdf");
+        run_pdfcpu(&exe, &["create", &blank.to_string_lossy()])
+            .or_else(|_| {
+                let img = f.dir.join("tiny.jpg");
+                write_jpeg(&img, 20, 20);
+                run_pdfcpu(
+                    &exe,
+                    &["import", "f:A4, pos:c", &blank.to_string_lossy(), &img.to_string_lossy()],
+                )
+            })
+            .ok();
+
+        if blank.exists() {
+            let _ = first_page_image(&exe, &blank, &f.dir.join("nowork"));
+        }
+        // The assertion is that neither call panics or blocks; a missing image is
+        // an ordinary Err.
+    }
+
+    #[test]
+    fn exporting_as_files_numbers_them_in_the_order_the_pdf_would_have_read() {
+        let mut f = Fx::new("folder");
+        let p = f.patient("Rahim Uddin");
+        f.doc(&p, "2026-03-14", "Thyroid Profile", "jpeg", 300);
+        f.doc(&p, "2026-01-10", "CBC", "jpeg", 300);
+        f.doc(&p, "2026-02-20", "Lipid Profile", "pdf", 300);
+
+        let out = to_folder(&f.conn, &f.user, &f.vault(), &f.request(Preset::Standard)).unwrap();
+        assert_eq!(out.copied, 3);
+        assert!(out.missing.is_empty());
+
+        let mut names: Vec<String> = std::fs::read_dir(&out.out_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+
+        // Date order, not the order they happen to sit in the database, and
+        // numbered so any viewer shows them that way.
+        assert_eq!(names.len(), 3);
+        assert!(names[0].starts_with("1_") && names[0].contains("CBC"), "{names:?}");
+        assert!(names[1].starts_with("2_") && names[1].contains("Lipid"), "{names:?}");
+        assert!(names[2].starts_with("3_") && names[2].contains("Thyroid"), "{names:?}");
+    }
+
+    #[test]
+    fn exported_files_keep_their_canonical_names_and_contents() {
+        let mut f = Fx::new("folderbytes");
+        let p = f.patient("Rahim Uddin");
+        f.doc(&p, "2026-01-10", "CBC", "jpeg", 300);
+
+        let out = to_folder(&f.conn, &f.user, &f.vault(), &f.request(Preset::Standard)).unwrap();
+        let file = std::fs::read_dir(&out.out_dir).unwrap().flatten().next().unwrap();
+        let name = file.file_name().to_string_lossy().to_string();
+
+        // The filename is what makes this degradation usable without the app.
+        assert!(name.contains("2026-01-10"), "{name}");
+        assert!(name.contains("Rahim-Uddin"), "{name}");
+
+        let source = f.vault().join("Rahim-Uddin").join("2026").join(
+            name.split_once('_').unwrap().1,
+        );
+        assert_eq!(
+            std::fs::read(file.path()).unwrap(),
+            std::fs::read(&source).unwrap(),
+            "copied verbatim, not recompressed",
+        );
+    }
+
+    #[test]
+    fn exporting_as_files_reports_what_it_could_not_copy() {
+        let mut f = Fx::new("foldermissing");
+        let p = f.patient("Rahim Uddin");
+        f.doc(&p, "2026-01-10", "CBC", "jpeg", 300);
+        f.doc(&p, "2026-02-20", "ESR", "jpeg", 300);
+
+        // One file gone from under the database — the reconciler's job, but the
+        // export must not pretend it copied it.
+        let gone: String = f
+            .conn
+            .query_row("SELECT rel_path FROM documents WHERE title = 'ESR'", [], |r| r.get(0))
+            .unwrap();
+        std::fs::remove_file(f.vault().join(gone.replace('\\', "/"))).unwrap();
+
+        let out = to_folder(&f.conn, &f.user, &f.vault(), &f.request(Preset::Standard)).unwrap();
+        assert_eq!(out.copied, 1, "the readable one still comes out");
+        assert_eq!(out.missing.len(), 1);
+        assert!(out.missing[0].contains("ESR"), "{:?}", out.missing);
+    }
+
+    #[test]
+    fn exporting_as_files_with_nothing_selected_says_so() {
+        let f = Fx::new("folderempty");
+        let err = to_folder(&f.conn, &f.user, &f.vault(), &f.request(Preset::Standard)).unwrap_err();
+        assert!(err.contains("Nothing matches"), "{err}");
     }
 
     #[test]

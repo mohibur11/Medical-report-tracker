@@ -197,6 +197,37 @@ pub fn tag_many(
     Ok(n)
 }
 
+/// Take a category off many documents at once.
+///
+/// The counterpart of `tag_many`: tagging a batch is easy to get wrong, and
+/// undoing it one popover at a time is the kind of chore that stops people
+/// tagging at all.
+pub fn untag_many(
+    conn: &mut Connection,
+    user_id: &str,
+    document_ids: &[String],
+    category_id: &str,
+) -> Result<usize, String> {
+    if document_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let mut n = 0usize;
+    for did in document_ids {
+        n += tx
+            .execute(
+                "DELETE FROM document_category
+                  WHERE document_id = ?1 AND category_id = ?2
+                    AND EXISTS (SELECT 1 FROM documents WHERE id = ?1 AND owner_user_id = ?3)",
+                params![did, category_id, user_id],
+            )
+            .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(n)
+}
+
 /// Tags for a set of documents, as (document_id, category_id) pairs. The UI joins
 /// them client-side rather than issuing a query per row.
 pub fn for_documents(

@@ -5,7 +5,14 @@ import { detectConflicts, isBlocked, type Conflict } from '../lib/extract/confli
 import { formatDmy, parseDmyInput, rankDateCandidates, type DateCandidate } from '../lib/extract/dates.ts';
 import { describe as describeDocument, type Suggestion } from '../lib/extract/lexicon.ts';
 import { buildName } from '../lib/naming/sanitize.ts';
-import { commitItem, runOcr, type IngestItem, type Patient } from '../lib/ipc.ts';
+import {
+  commitItem,
+  runOcr,
+  stagedPdfTextSource,
+  type IngestItem,
+  type Patient,
+} from '../lib/ipc.ts';
+import { extractText } from '../lib/pdf.ts';
 import { ocrQueue } from '../lib/queue.ts';
 
 /**
@@ -66,6 +73,8 @@ export function ReviewRow({
   const [candidates, setCandidates] = useState<DateCandidate[]>([]);
   const [pageText, setPageText] = useState('');
   const [titleIdeas, setTitleIdeas] = useState<Suggestion[]>([]);
+  /** True when the text came out of the PDF itself rather than the recognizer. */
+  const [exactText, setExactText] = useState(false);
 
   /**
    * Read the page and pre-fill the date.
@@ -82,15 +91,42 @@ export function ReviewRow({
     // Through the queue, not straight to the backend: a backlog import mounts
     // every row at once, and a row the user has already scrolled past should not
     // hold a recognition slot.
-    ocrQueue.run(() => (alive ? runOcr(item.id) : Promise.resolve(null))).then(
-      (pages) => {
-        if (!alive || !pages) return;
+    ocrQueue
+      .run(async () => {
+        if (!alive) return null;
+
+        // A PDF emailed straight from a lab carries its text exactly. Reading it
+        // is faster than recognising pixels and cannot misread a digit, so it is
+        // tried first; a scan carries no text and falls through to the recognizer.
+        if (item.fileKind === 'pdf') {
+          try {
+            const b64 = await stagedPdfTextSource(item.id);
+            if (b64) {
+              const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+              const pages = await extractText(bytes);
+              if (pages.length > 0) {
+                return { exact: true, text: pages.map((p) => p.text).join('\n') };
+              }
+            }
+          } catch {
+            // Not worth reporting: recognition still works, and does the same job.
+          }
+        }
+
+        if (!alive) return null;
+        const pages = await runOcr(item.id);
+        return { exact: false, text: pages.map((p) => p.text).join('\n') };
+      })
+      .then(
+      (read) => {
+        if (!alive || !read) return;
         setReading(false);
+        setExactText(read.exact);
 
         // Rank across the whole document. A twelve-page report carries its date
         // on the first page, but a covering letter or a lab slip can put it
         // anywhere, and pages are cheap to read together.
-        const text = pages.map((p) => p.text).join('\n');
+        const text = read.text;
         setPageText(text);
         const ranked = rankDateCandidates(text);
         setCandidates(ranked);
@@ -275,6 +311,14 @@ export function ReviewRow({
         {(reading || candidates.length > 0) && (
           <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[11px]">
             {reading && <span className="text-slate-400">reading the page…</span>}
+            {exactText && !reading && (
+              <span
+                className="text-emerald-700 dark:text-emerald-400"
+                title="This PDF carried its own text, so nothing had to be read from pixels"
+              >
+                exact text
+              </span>
+            )}
             {candidates.map((c) => {
               const chosen = iso === c.iso;
               return (

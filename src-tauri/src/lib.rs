@@ -65,6 +65,45 @@ fn unlock_pdf(
     ingest::unlock(&conn, &user.0, &ingest_id, &password)
 }
 
+/// The bytes of a staged PDF, when it is small enough to be worth reading in the
+/// window.
+///
+/// A PDF emailed by a lab carries its text exactly, and reading that beats
+/// recognising pixels on both speed and accuracy. Whether a given file has such
+/// text cannot be decided cheaply from outside — measured: a text layer can sit
+/// inside a form XObject where neither the font list nor the page content stream
+/// mentions it — so the only gate is size. A text-layer PDF is small; anything
+/// larger is a scan, and shipping tens of megabytes across the bridge to learn
+/// that would cost more than the recognition it hoped to avoid.
+#[tauri::command]
+fn staged_pdf_text_source(
+    state: State<'_, Db>,
+    ingest_id: String,
+) -> Result<Option<String>, String> {
+    use base64::Engine;
+
+    const MAX_BYTES: u64 = 12 * 1024 * 1024;
+
+    let staged: Option<String> = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT staged_path FROM ingest_items WHERE id = ?1 AND file_kind = 'pdf'",
+            rusqlite::params![ingest_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(None)
+    };
+    let Some(staged) = staged else { return Ok(None) };
+    let path = std::path::PathBuf::from(staged);
+
+    if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(u64::MAX) > MAX_BYTES {
+        return Ok(None);
+    }
+
+    let bytes = std::fs::read(&path).map_err(|e| format!("cannot read the staged file: {e}"))?;
+    Ok(Some(base64::engine::general_purpose::STANDARD.encode(bytes)))
+}
+
 #[tauri::command]
 fn list_staged(state: State<'_, Db>, user: State<'_, CurrentUser>) -> Result<Vec<IngestItem>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
@@ -401,6 +440,17 @@ fn tag_documents(
     categories::tag_many(&mut conn, &user.0, &document_ids, &category_id)
 }
 
+#[tauri::command]
+fn untag_documents(
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+    document_ids: Vec<String>,
+    category_id: String,
+) -> Result<usize, String> {
+    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+    categories::untag_many(&mut conn, &user.0, &document_ids, &category_id)
+}
+
 /// (documentId, categoryId) pairs for the given documents, joined client-side so
 /// the library list does not issue a query per row.
 #[tauri::command]
@@ -441,6 +491,19 @@ async fn export_pdf(
 }
 
 /// Reveal a finished export in Explorer, selecting the file.
+/// The escape hatch: the same filtered slice as loose, numbered files.
+#[tauri::command]
+fn export_to_folder(
+    app: AppHandle,
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+    request: export::ExportRequest,
+) -> Result<export::FolderExport, String> {
+    let vault_root = paths::vault_root(&app)?;
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    export::to_folder(&conn, &user.0, &vault_root, &request)
+}
+
 #[tauri::command]
 fn reveal_in_explorer(path: String) -> Result<(), String> {
     let p = std::path::PathBuf::from(&path);
@@ -623,6 +686,7 @@ pub fn run() {
             db_health,
             import_files,
             list_staged,
+            staged_pdf_text_source,
             unlock_pdf,
             staged_thumb,
             list_patients,
@@ -636,6 +700,7 @@ pub fn run() {
             list_documents,
             list_years,
             export_pdf,
+            export_to_folder,
             reveal_in_explorer,
             list_categories,
             create_category,
@@ -643,6 +708,7 @@ pub fn run() {
             archive_category,
             set_document_categories,
             tag_documents,
+            untag_documents,
             document_tags,
             search_documents,
             reindex,

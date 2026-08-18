@@ -7,6 +7,8 @@ import { BulkBar } from './components/BulkBar.tsx';
 import { CategoryManager, CategoryPicker } from './components/CategoryPicker.tsx';
 import { EditRow } from './components/EditRow.tsx';
 import { ExportPanel } from './components/ExportPanel.tsx';
+import { LibraryBulkBar } from './components/LibraryBulkBar.tsx';
+import { LibraryList } from './components/LibraryList.tsx';
 import { IDLE_LOCK_MS, LockScreen, LockSettings } from './components/Lock.tsx';
 import { LockedRow } from './components/LockedRow.tsx';
 import { PatientsPanel } from './components/PatientsPanel.tsx';
@@ -30,6 +32,7 @@ import {
   type LockState,
   setDocumentCategories,
   tagDocuments,
+  untagDocuments,
   trashDocument,
   type Category,
   type DbHealth,
@@ -69,6 +72,13 @@ export default function App() {
   const [editingId, setEditingId] = useState<string | null>(null);
   /** Review-queue multi-select, for the bulk bar. */
   const [sel, setSel] = useState(selection.EMPTY);
+  /** The same, for filed documents. Kept apart: the two lists hold different ids
+   *  and selecting in one must not act on the other. */
+  const [docSel, setDocSel] = useState(selection.EMPTY);
+  const [docBulkBusy, setDocBulkBusy] = useState(false);
+  const [docBulkStatus, setDocBulkStatus] = useState<string | null>(null);
+  /** The scroller the library list virtualizes against. */
+  const mainRef = useRef<HTMLElement | null>(null);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkStatus, setBulkStatus] = useState<string | null>(null);
 
@@ -250,11 +260,81 @@ export default function App() {
   const pendingIds = pending.map((i) => i.id);
   const pendingKey = pendingIds.join(',');
 
+  const docKey = docs.map((d) => d.id).join(',');
+  useEffect(() => {
+    setDocSel((prev) => selection.prune(prev, docKey ? docKey.split(',') : []));
+  }, [docKey]);
+
   // Filed rows leave the queue; a selection still holding them would make the
   // count lie and aim the next bulk action at nothing.
   useEffect(() => {
     setSel((prev) => selection.prune(prev, pendingKey ? pendingKey.split(',') : []));
   }, [pendingKey]);
+
+  const docIds = docs.map((d) => d.id);
+
+  /**
+   * Apply a category to everything selected, or take it away.
+   *
+   * One call for the whole selection rather than one per document: a backlog
+   * tagged sixty at a time should not be sixty round trips, and a half-applied
+   * tag is a worse outcome than a slow one.
+   */
+  async function tagSelected(categoryId: string, add: boolean) {
+    const ids = selection.ordered(docSel, docIds);
+    if (ids.length === 0) return;
+    setDocBulkBusy(true);
+    setDocBulkStatus(null);
+    try {
+      const n = add
+        ? await tagDocuments(ids, categoryId)
+        : await untagDocuments(ids, categoryId);
+      const name = categories.find((c) => c.id === categoryId)?.name ?? 'that category';
+      setDocBulkStatus(
+        add
+          ? `Tagged ${n} document${n === 1 ? '' : 's'} as ${name}.`
+          : `Removed ${name} from ${n} document${n === 1 ? '' : 's'}.`,
+      );
+      refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setDocBulkBusy(false);
+    }
+  }
+
+  /** Move every selected document to Trash. Nothing is unlinked. */
+  async function trashSelected() {
+    const ids = selection.ordered(docSel, docIds);
+    if (ids.length === 0) return;
+    const ok = window.confirm(
+      `Move ${ids.length} document${ids.length === 1 ? '' : 's'} to Trash?\n\n` +
+        `The files are not deleted — they move to the Trash folder inside your vault, ` +
+        `and can be put back from there.`,
+    );
+    if (!ok) return;
+
+    setDocBulkBusy(true);
+    setDocBulkStatus(null);
+    let moved = 0;
+    const failed: string[] = [];
+    for (const id of ids) {
+      try {
+        await trashDocument(id);
+        moved += 1;
+      } catch (e) {
+        failed.push(`${docs.find((d) => d.id === id)?.title ?? id} — ${String(e)}`);
+      }
+    }
+    setDocBulkBusy(false);
+    setDocSel(selection.EMPTY);
+    setDocBulkStatus(
+      failed.length === 0
+        ? `Moved ${moved} to Trash.`
+        : `Moved ${moved}, left ${failed.length}: ${failed.slice(0, 2).join(' · ')}`,
+    );
+    refresh();
+  }
 
   const applyToSelected = (fn: (api: RowHandle['current']) => void) => {
     for (const id of selection.ordered(sel, pendingIds)) {
@@ -386,7 +466,7 @@ export default function App() {
         </div>
       )}
 
-      <main className="relative flex-1 overflow-y-auto overflow-x-hidden">
+      <main ref={mainRef} className="relative flex-1 overflow-y-auto overflow-x-hidden">
         {view === 'library' ? (
           <>
             <LockSettings state={lock} onChanged={refreshLock} />
@@ -407,80 +487,44 @@ export default function App() {
                 Nothing filed yet. Review the inbox first.
               </p>
             ) : (
-              <ul className="divide-y divide-slate-100 dark:divide-slate-800">
-                {docs.map((d) =>
-                  editingId === d.id ? (
-                    <EditRow
-                      key={d.id}
-                      doc={d}
-                      patients={patients}
-                      onSaved={() => {
-                        setEditingId(null);
-                        refresh();
-                      }}
-                      onCancel={() => setEditingId(null)}
-                    />
-                  ) : (
-                  <li key={d.id} className="px-6 py-2">
-                    <div className="flex items-baseline gap-3">
-                      <span className="w-24 shrink-0 font-mono text-xs text-slate-500 dark:text-slate-400">
-                        {formatDmy(d.docDate)}
-                      </span>
-                      <span className="min-w-0 flex-1 truncate text-sm">{d.title}</span>
-                    </div>
-                    {/* Patient, type and tags share the second line. Several
-                        categories per document is normal, and none of it should
-                        squeeze the title. */}
-                    <div className="mt-1 flex flex-wrap items-center gap-2 pl-28 text-xs text-slate-500 dark:text-slate-400">
-                      <span>{d.patient}</span>
-                      <span className="text-slate-400">
-                        {d.fileKind.toUpperCase()}
-                        {d.pageCount > 1 && ` · ${d.pageCount}p`}
-                      </span>
-                      <CategoryPicker
-                        categories={categories}
-                        selected={tags[d.id] ?? []}
-                        onChange={(ids) => void retag(d.id, ids)}
-                      />
-                      {d.notes && (
-                        <span
-                          className="max-w-72 truncate italic text-slate-500 dark:text-slate-400"
-                          title={d.notes}
-                        >
-                          {d.notes}
-                        </span>
-                      )}
-                      {d.missing && (
-                        <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-800 dark:bg-amber-900 dark:text-amber-200">
-                          file missing
-                        </span>
-                      )}
-                      <button
-                        type="button"
-                        title="Change the date, title, patient or type"
-                        onClick={() => setEditingId(d.id)}
-                        className="rounded border border-slate-300 px-1.5 py-0.5 hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800"
-                      >
-                        Edit
-                      </button>
-                      <button
-                        type="button"
-                        title="Move to the vault's Trash folder — the file is not deleted"
-                        onClick={() => {
-                          if (!window.confirm(`Move '${d.title}' to Trash?
+              <>
+                <LibraryBulkBar
+                  selectedCount={docSel.ids.size}
+                  allChecked={selection.allSelected(docSel, docIds)}
+                  onToggleAll={() => setDocSel((prev) => selection.toggleAll(prev, docIds))}
+                  categories={categories}
+                  onTag={(id) => void tagSelected(id, true)}
+                  onUntag={(id) => void tagSelected(id, false)}
+                  onDelete={() => void trashSelected()}
+                  busy={docBulkBusy}
+                  status={docBulkStatus}
+                />
+                <LibraryList
+                  docs={docs}
+                  patients={patients}
+                  categories={categories}
+                  tags={tags}
+                  sel={docSel}
+                  onSel={setDocSel}
+                  editingId={editingId}
+                  onEdit={setEditingId}
+                  onSaved={() => {
+                    setEditingId(null);
+                    refresh();
+                  }}
+                  onRetag={(id, ids) => void retag(id, ids)}
+                  onTrash={(d) => {
+                    if (
+                      !window.confirm(`Move '${d.title}' to Trash?
 
-The file is not deleted — it moves to the Trash folder inside your vault, and you can put it back from there.`)) return;
-                          trashDocument(d.id).then(refresh, (e: unknown) => setError(String(e)));
-                        }}
-                        className="rounded border border-slate-300 px-1.5 py-0.5 text-red-600 hover:bg-red-50 dark:border-slate-600 dark:hover:bg-red-950"
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </li>
-                  ),
-                )}
-              </ul>
+The file is not deleted — it moves to the Trash folder inside your vault, and you can put it back from there.`)
+                    )
+                      return;
+                    trashDocument(d.id).then(refresh, (e: unknown) => setError(String(e)));
+                  }}
+                  scrollRef={mainRef}
+                />
+              </>
             )}
           </>
         ) : items.length === 0 && filed.length === 0 ? (

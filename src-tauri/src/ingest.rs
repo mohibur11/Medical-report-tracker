@@ -307,7 +307,22 @@ fn stage_one(
         // same call says whether the file can be opened at all.
         if let Ok(exe) = crate::export::pdfcpu_path() {
             match crate::export::probe_pdf(&exe, &staged_path) {
-                crate::export::PdfState::Readable { pages } => item.page_count = Some(pages),
+                crate::export::PdfState::Readable { pages } => {
+                    item.page_count = Some(pages);
+
+                    // A grey box labelled PDF tells the reviewer nothing about
+                    // which report they are looking at. Page one does.
+                    let work = staging.join(format!("{id}.page1"));
+                    if let Ok(bytes) = crate::export::first_page_image(&exe, &staged_path, &work) {
+                        if let Ok(thumb) = imaging::thumbnail_of_any(&bytes) {
+                            let path = staging.join(format!("{id}.thumb.jpg"));
+                            if std::fs::write(&path, &thumb).is_ok() {
+                                item.thumb_path = Some(path.display().to_string());
+                            }
+                        }
+                    }
+                    let _ = std::fs::remove_dir_all(&work);
+                }
                 crate::export::PdfState::Locked => {
                     // Kept, not rejected: the file is fine, it just needs a
                     // password. Left in the queue with somewhere to type one.

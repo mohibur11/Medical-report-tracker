@@ -78,6 +78,11 @@ and still produces the rest.
 Each row reads its page and pre-fills what it found. This is the screen the whole
 app rests on, so it is the one worth being picky about.
 
+- A **PDF that carries its own text** — one emailed straight from a lab rather
+  than scanned — is read exactly instead of recognised, and the row says
+  `exact text`. Nothing is guessed from pixels in that case. Scans have no text
+  layer and take the recognition path as before.
+- **PDF rows show their first page**, not a grey badge.
 - The **date** is pre-filled from the page. The chips beside it are the other dates
   found, labelled with the evidence — `sample collected`, `reported`, `date of
   birth`. Clicking one replaces the date.
@@ -144,6 +149,12 @@ closed and open — they are different code paths.
   does not recognise strictly alone.
 - **Back up now** — writes a database snapshot into the vault. Also happens
   automatically when you close the app.
+- **Bulk tagging** — tick documents (shift-click takes a run), pick a category,
+  then **Add tag** or **Remove tag**. Sixty thyroid reports filed over ten years
+  all want the same category, and doing that one popover at a time is what stops
+  people tagging at all. **Delete selected** moves the lot to Trash.
+- The list is **virtualized**: only the rows on screen exist in the page, so a
+  library of several hundred scrolls the same as a library of five.
 - **Notes** — `Edit` on any document has a notes box. It is not part of the
   filename, so writing one never moves the file. Notes are searchable, and they
   are written into the `.meta.json` sidecar beside the document, which is what
@@ -178,6 +189,12 @@ on Windows, and a date of birth later than a report already filed for that patie
 
 Pick a patient, a year, a category, a quality preset, then **Create PDF**. Output
 lands in `<vault>\Exports\`.
+
+**Export as files** is the escape hatch: the same filtered documents copied out
+as loose, numbered files instead of one merged PDF. Because the canonical
+filenames already carry date, patient and title, and the numbering keeps the
+merged order, this stays usable — for a USB stick, or when a source PDF refuses
+to merge.
 
 **Save these filters** keeps that combination under a name, and saved presets
 appear as chips above the filters. What is stored is the filter, not the result:

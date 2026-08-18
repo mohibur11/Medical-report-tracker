@@ -145,6 +145,13 @@ export const runOcr = (ingestId: string): Promise<OcrPage[]> => invoke('run_ocr'
 
 export const ocrAvailable = (): Promise<boolean> => invoke('ocr_available');
 
+/**
+ * Base64 of a staged PDF, but only when it has embedded fonts and so plausibly
+ * carries real text. Scans come back null and take the recognition path.
+ */
+export const stagedPdfTextSource = (ingestId: string): Promise<string | null> =>
+  invoke('staged_pdf_text_source', { ingestId });
+
 export interface LockState {
   enabled: boolean;
   email: string;
@@ -235,6 +242,10 @@ export const setDocumentCategories = (documentId: string, categoryIds: string[])
 export const tagDocuments = (documentIds: string[], categoryId: string): Promise<number> =>
   invoke('tag_documents', { documentIds, categoryId });
 
+/** Take a category off many documents at once — the undo for a bulk tag. */
+export const untagDocuments = (documentIds: string[], categoryId: string): Promise<number> =>
+  invoke('untag_documents', { documentIds, categoryId });
+
 /** (documentId, categoryId) pairs, joined client-side. */
 export const documentTags = (documentIds: string[]): Promise<Array<[string, string]>> =>
   invoke('document_tags', { documentIds });
@@ -319,6 +330,22 @@ export const deleteExportPreset = (id: string): Promise<void> =>
 
 /** Keeps the list ordered by habit rather than alphabet. */
 export const useExportPreset = (id: string): Promise<void> => invoke('use_export_preset', { id });
+
+export interface FolderExport {
+  outDir: string;
+  copied: number;
+  missing: string[];
+}
+
+/**
+ * The same filtered slice as loose, numbered files.
+ *
+ * The escape hatch for when merging cannot work — an unreadable source, no room
+ * for the intermediates. The canonical filenames already carry date, patient and
+ * title, and the numbering keeps the order the merged PDF would have had.
+ */
+export const exportToFolder = (request: ExportRequest): Promise<FolderExport> =>
+  invoke('export_to_folder', { request });
 
 export const revealInExplorer = (path: string): Promise<void> =>
   invoke('reveal_in_explorer', { path });

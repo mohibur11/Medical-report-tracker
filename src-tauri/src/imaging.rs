@@ -108,6 +108,14 @@ pub struct Derivatives {
     pub thumb_jpeg: Vec<u8>,
 }
 
+/// A thumbnail from bytes of unknown format — a page pdfcpu extracted, which may
+/// be JPEG, PNG or TIFF depending on how the scanner stored it.
+pub fn thumbnail_of_any(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let img = image::load_from_memory(bytes).map_err(|e| format!("decode failed: {e}"))?;
+    let thumb = downscale(&img, THUMB_LONG_EDGE, image::imageops::FilterType::Triangle);
+    encode_jpeg(&thumb, THUMB_QUALITY)
+}
+
 /// Decode, bake, and produce both derivatives from raw file bytes.
 pub fn derive(bytes: &[u8], format: ImageFormat) -> Result<Derivatives, String> {
     let orientation = read_orientation(bytes);

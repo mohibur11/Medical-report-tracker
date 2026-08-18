@@ -20,8 +20,10 @@
     "spike:merge": "node spikes/merge.ts"
   },
   "dependencies": {
+    "@tanstack/react-virtual": "^3.14.10",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-dialog": "^2.7.2",
+    "pdfjs-dist": "^6.2.108",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

@@ -553,7 +553,7 @@ pub fn rename_patient(
     new_name: &str,
     new_dob: Option<&str>,
 ) -> Result<RenameReport, String> {
-    let (old_name, old_slug): (String, String) = conn
+    let (_old_name, old_slug): (String, String) = conn
         .query_row(
             "SELECT display_name, folder_slug FROM patients
              WHERE id = ?1 AND owner_user_id = ?2 AND archived_at IS NULL",

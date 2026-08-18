@@ -3,12 +3,14 @@ import { useEffect, useState } from 'react';
 import {
   deleteExportPreset,
   exportPdf,
+  exportToFolder,
   listExportPresets,
   revealInExplorer,
   saveExportPreset,
   useExportPreset,
   type Category,
   type ExportPreset,
+  type FolderExport,
   type ExportResult,
   type Patient,
   type Preset,
@@ -52,6 +54,7 @@ export function ExportPanel({
   const [error, setError] = useState<string | null>(null);
   const [presets, setPresets] = useState<ExportPreset[]>([]);
   const [applied, setApplied] = useState<string | null>(null);
+  const [folder, setFolder] = useState<FolderExport | null>(null);
 
   const loadPresets = () => listExportPresets().then(setPresets, () => {});
   useEffect(() => void loadPresets(), []);
@@ -119,10 +122,41 @@ export function ExportPanel({
 
   const scope = what ? `${who} — ${what}` : who;
 
+  /**
+   * The escape hatch. Kept next to the main button rather than hidden behind a
+   * failure, because "give me the files" is a legitimate thing to want on its own
+   * — for a USB stick, or for someone who would rather print them individually.
+   */
+  async function runFolder() {
+    setBusy(true);
+    setError(null);
+    setResult(null);
+    setFolder(null);
+    try {
+      setFolder(
+        await exportToFolder({
+          patientIds,
+          years: selectedYears,
+          categoryIds,
+          docTypes: [],
+          preset,
+          maxBytes: null,
+          outDir: `${vaultPath}\Exports`,
+          baseName: `${scope} — Files`,
+        }),
+      );
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function run() {
     setBusy(true);
     setError(null);
     setResult(null);
+    setFolder(null);
     try {
       setResult(
         await exportPdf({
@@ -278,6 +312,15 @@ export function ExportPanel({
             again each visit is friction on the one action that matters. */}
         <button
           type="button"
+          disabled={busy || documentCount === 0}
+          onClick={() => void runFolder()}
+          title="Copy the same documents out as separate numbered files instead of one PDF"
+          className="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50 disabled:opacity-40 dark:border-slate-600 dark:hover:bg-slate-800"
+        >
+          Export as files
+        </button>
+        <button
+          type="button"
           onClick={() => void saveCurrent()}
           className="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800"
         >
@@ -292,6 +335,28 @@ export function ExportPanel({
         <pre className="selectable mt-3 whitespace-pre-wrap rounded border border-red-300 bg-red-50 p-2 font-mono text-xs text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
           {error}
         </pre>
+      )}
+
+      {folder && (
+        <div className="mt-3 rounded border border-emerald-300 bg-emerald-50 p-3 text-xs dark:border-emerald-900 dark:bg-emerald-950">
+          <p className="font-medium text-emerald-900 dark:text-emerald-200">
+            {folder.copied} file{folder.copied === 1 ? '' : 's'} copied, numbered in date order.
+          </p>
+          <button
+            type="button"
+            onClick={() => void revealInExplorer(folder.outDir)}
+            className="selectable mt-1 font-mono underline decoration-dotted hover:decoration-solid"
+          >
+            {folder.outDir}
+          </button>
+          {folder.missing.length > 0 && (
+            <ul className="mt-1.5 space-y-0.5 text-amber-700 dark:text-amber-300">
+              {folder.missing.map((m) => (
+                <li key={m}>{m}</li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
 
       {result && (
