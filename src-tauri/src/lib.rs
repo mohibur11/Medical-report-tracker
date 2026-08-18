@@ -352,6 +352,7 @@ fn staged_thumb(app: AppHandle, id: String) -> Result<Option<String>, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle();
 

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
+import { open } from '@tauri-apps/plugin-dialog';
 
 import { CategoryManager, CategoryPicker } from './components/CategoryPicker.tsx';
 import { ExportPanel } from './components/ExportPanel.tsx';
@@ -138,16 +139,43 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const pending = getCurrentWebview().onDragDropEvent((event) => {
-      if (event.payload.type === 'over') setDragging(true);
-      else if (event.payload.type === 'leave') setDragging(false);
-      else if (event.payload.type === 'drop') {
-        setDragging(false);
-        void ingest(event.payload.paths);
-      }
-    });
+    // Registering this can fail — Tauri denies core APIs unless a capability
+    // grants them, and the failure is a rejected promise, not an exception. Left
+    // unhandled it produces an app that looks fine and silently ignores every
+    // dropped file, which is worse than an app that plainly does not start.
+    const pending = getCurrentWebview()
+      .onDragDropEvent((event) => {
+        if (event.payload.type === 'over') setDragging(true);
+        else if (event.payload.type === 'leave') setDragging(false);
+        else if (event.payload.type === 'drop') {
+          setDragging(false);
+          void ingest(event.payload.paths);
+        }
+      })
+      .catch((e: unknown) => {
+        setError(
+          `Drag and drop is unavailable: ${String(e)}. Use the Add files button instead.`,
+        );
+        return () => {};
+      });
+
     return () => void pending.then((un) => un());
   }, [ingest]);
+
+  /** The door that always works, whatever drag-and-drop is doing. */
+  async function pickFiles() {
+    try {
+      const picked = await open({
+        multiple: true,
+        title: 'Add scans or PDFs',
+        filters: [{ name: 'Scans and PDFs', extensions: ['jpg', 'jpeg', 'png', 'pdf', 'tif', 'tiff', 'webp'] }],
+      });
+      if (!picked) return;
+      await ingest(Array.isArray(picked) ? picked : [picked]);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   async function addPatient() {
     const name = window.prompt('Patient name');
@@ -209,6 +237,13 @@ export default function App() {
               </button>
             ))}
           </nav>
+          <button
+            type="button"
+            onClick={() => void pickFiles()}
+            className="rounded bg-sky-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-sky-700"
+          >
+            Add files…
+          </button>
           <button
             type="button"
             onClick={() => void addPatient()}
@@ -308,7 +343,7 @@ export default function App() {
           <div className="flex h-full items-center justify-center">
             <div className="text-center">
               <p className="text-sm text-slate-500 dark:text-slate-400">
-                Drop scans or PDFs anywhere in this window.
+                Drop scans or PDFs anywhere in this window, or use Add files.
               </p>
               <p className="mt-1 text-xs text-slate-400 dark:text-slate-500">
                 Photos are straightened, de-duplicated and downscaled on the way in.
