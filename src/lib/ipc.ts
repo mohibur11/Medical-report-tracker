@@ -140,6 +140,21 @@ export interface ReconcileReport {
 /** Compare the vault with the database and repair what can be repaired. */
 export const rescanVault = (): Promise<ReconcileReport> => invoke('rescan_vault');
 
+/**
+ * Change a filed document's details.
+ *
+ * The date, patient and title are all part of the canonical filename, and the
+ * patient and year are its folders — so an edit can move the file across the
+ * vault, journalled the same way filing is.
+ */
+export const updateDocument = (args: {
+  documentId: string;
+  patientId: string;
+  docDate: string;
+  title: string;
+  docType: string;
+}): Promise<CommittedDocument> => invoke('update_document', args);
+
 /** Move a document to the vault's Trash folder. Nothing is unlinked. */
 export const trashDocument = (documentId: string): Promise<void> =>
   invoke('trash_document', { documentId });

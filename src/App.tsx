@@ -3,6 +3,7 @@ import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { open } from '@tauri-apps/plugin-dialog';
 
 import { CategoryManager, CategoryPicker } from './components/CategoryPicker.tsx';
+import { EditRow } from './components/EditRow.tsx';
 import { ExportPanel } from './components/ExportPanel.tsx';
 import { IDLE_LOCK_MS, LockScreen, LockSettings } from './components/Lock.tsx';
 import { ReviewRow } from './components/ReviewRow.tsx';
@@ -56,6 +57,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [lock, setLock] = useState<LockState>({ enabled: false, email: '' });
   const [locked, setLocked] = useState(false);
+  /** Which library row is open for editing, if any. */
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   const refreshLock = useCallback(() => {
     lockState().then((s) => {
@@ -295,7 +298,19 @@ export default function App() {
               </p>
             ) : (
               <ul className="divide-y divide-slate-100 dark:divide-slate-800">
-                {docs.map((d) => (
+                {docs.map((d) =>
+                  editingId === d.id ? (
+                    <EditRow
+                      key={d.id}
+                      doc={d}
+                      patients={patients}
+                      onSaved={() => {
+                        setEditingId(null);
+                        refresh();
+                      }}
+                      onCancel={() => setEditingId(null)}
+                    />
+                  ) : (
                   <li key={d.id} className="px-6 py-2">
                     <div className="flex items-baseline gap-3">
                       <span className="w-24 shrink-0 font-mono text-xs text-slate-500 dark:text-slate-400">
@@ -324,18 +339,29 @@ export default function App() {
                       )}
                       <button
                         type="button"
+                        title="Change the date, title, patient or type"
+                        onClick={() => setEditingId(d.id)}
+                        className="rounded border border-slate-300 px-1.5 py-0.5 hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
                         title="Move to the vault's Trash folder — the file is not deleted"
                         onClick={() => {
-                          if (!window.confirm(`Move '${d.title}' to Trash? The file stays in the vault's Trash folder.`)) return;
+                          if (!window.confirm(`Move '${d.title}' to Trash?
+
+The file is not deleted — it moves to the Trash folder inside your vault, and you can put it back from there.`)) return;
                           trashDocument(d.id).then(refresh, (e: unknown) => setError(String(e)));
                         }}
-                        className="text-slate-400 hover:text-red-600"
+                        className="rounded border border-slate-300 px-1.5 py-0.5 text-red-600 hover:bg-red-50 dark:border-slate-600 dark:hover:bg-red-950"
                       >
-                        Trash
+                        Delete
                       </button>
                     </div>
                   </li>
-                ))}
+                  ),
+                )}
               </ul>
             )}
           </>

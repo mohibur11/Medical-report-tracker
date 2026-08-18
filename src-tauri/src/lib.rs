@@ -162,6 +162,35 @@ fn disable_password(
     auth::disable(&conn, &user.0, &current)
 }
 
+/// Change a filed document's details. Moves the file if its canonical name or
+/// folder changes, which correcting a date or a patient always does.
+#[tauri::command]
+fn update_document(
+    app: AppHandle,
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+    document_id: String,
+    patient_id: String,
+    doc_date: String,
+    title: String,
+    doc_type: String,
+) -> Result<vault::CommittedDocument, String> {
+    let vault_root = paths::vault_root(&app)?;
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    vault::update(
+        &conn,
+        &user.0,
+        &vault_root,
+        vault::UpdateRequest {
+            document_id: &document_id,
+            patient_id: &patient_id,
+            doc_date: &doc_date,
+            title: &title,
+            doc_type: &doc_type,
+        },
+    )
+}
+
 /// Move a document to the vault's Trash folder. Nothing is unlinked.
 #[tauri::command]
 fn trash_document(
@@ -449,6 +478,7 @@ pub fn run() {
             reindex,
             rescan_vault,
             trash_document,
+            update_document,
             backup_now,
             run_ocr,
             ocr_available,

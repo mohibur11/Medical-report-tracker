@@ -159,6 +159,53 @@ fn mark_failed(conn: &Connection, id: &str, error: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Refuse a date that cannot be right, saying which value to correct.
+///
+/// Shared by filing and editing. The review screen checks these too, but it is the
+/// wrong place to rely on: a record saved wrong is not recoverable by reading it
+/// later.
+fn validate_date(
+    conn: &Connection,
+    doc_date: &str,
+    patient_name: &str,
+    patient_dob: Option<&str>,
+) -> Result<(), String> {
+    if !naming::is_valid_doc_date(doc_date) {
+        return Err(format!("'{doc_date}' is not a real date. Correct the date before saving."));
+    }
+
+    // The unknown sentinel means exactly that, not the year zero, so it is exempt
+    // from every comparison below.
+    if doc_date.starts_with("0000") {
+        return Ok(());
+    }
+
+    let today: String = conn
+        .query_row("SELECT date('now')", [], |r| r.get(0))
+        .unwrap_or_default();
+    if !today.is_empty() && doc_date > today.as_str() {
+        return Err(format!(
+            "{} is in the future. Correct the date before saving.",
+            display_dmy(doc_date)
+        ));
+    }
+
+    if let Some(dob) = patient_dob.filter(|d| naming::is_valid_doc_date(d)) {
+        if doc_date < dob {
+            return Err(format!(
+                "This report is dated {}, before {}'s date of birth ({}). \
+                 One of the two is wrong - correct the date, or fix the date of birth \
+                 on the patient, before saving.",
+                display_dmy(doc_date),
+                patient_name,
+                display_dmy(dob)
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Dates are ISO on disk and day-first everywhere a person reads them.
 fn display_dmy(iso: &str) -> String {
     match (iso.get(0..4), iso.get(5..7), iso.get(8..10)) {
@@ -207,38 +254,7 @@ pub fn commit(
         )
         .map_err(|e| format!("no such patient: {e}"))?;
 
-    // The review screen already refuses these, but it is the wrong place to rely
-    // on: a saved record that is wrong on its face is not recoverable by reading
-    // it later. Each message says which value to correct.
-    if !naming::is_valid_doc_date(req.doc_date) {
-        return Err(format!(
-            "'{}' is not a real date. Correct the date before filing.",
-            req.doc_date
-        ));
-    }
-
-    let today: String = conn
-        .query_row("SELECT date('now')", [], |r| r.get(0))
-        .unwrap_or_default();
-    if !req.doc_date.starts_with("0000") && !today.is_empty() && req.doc_date > today.as_str() {
-        return Err(format!(
-            "{} is in the future. Correct the date before filing.",
-            display_dmy(req.doc_date)
-        ));
-    }
-
-    if let Some(dob) = patient_dob.as_deref().filter(|d| naming::is_valid_doc_date(d)) {
-        if !req.doc_date.starts_with("0000") && req.doc_date < dob {
-            return Err(format!(
-                "This report is dated {}, before {}'s date of birth ({}). \
-                 One of the two is wrong — correct the date, or fix the date of birth \
-                 on the patient, before filing.",
-                display_dmy(req.doc_date),
-                patient_name,
-                display_dmy(dob)
-            ));
-        }
-    }
+    validate_date(conn, req.doc_date, &patient_name, patient_dob.as_deref())?;
 
     let ext = staged
         .extension()
@@ -358,6 +374,135 @@ pub fn commit(
 
     Ok(CommittedDocument {
         id: doc_id,
+        rel_path: built.rel_path,
+        file_name: built.file_name,
+        title_truncated: built.title_truncated,
+    })
+}
+
+pub struct UpdateRequest<'a> {
+    pub document_id: &'a str,
+    pub patient_id: &'a str,
+    pub doc_date: &'a str,
+    pub title: &'a str,
+    pub doc_type: &'a str,
+}
+
+/// Change a filed document's details, moving the file if its canonical name or
+/// folder changes.
+///
+/// Editing is not a database-only operation here. The date, the patient and the
+/// title are all IN the filename, and the patient and year are the folders, so
+/// correcting a typo can mean moving the file across the vault. That move gets the
+/// same treatment as filing: intent journalled first, so a crash cannot leave the
+/// tree disagreeing with the database.
+///
+/// The collision suffix is only re-reserved when the base name actually changes.
+/// Re-reserving on every edit would burn a suffix each time the user fixed a
+/// spelling, and suffixes are never reused.
+pub fn update(
+    conn: &Connection,
+    user_id: &str,
+    vault_root: &Path,
+    req: UpdateRequest<'_>,
+) -> Result<CommittedDocument, String> {
+    let (old_rel, file_kind): (String, String) = conn
+        .query_row(
+            "SELECT rel_path, file_kind FROM documents
+             WHERE id = ?1 AND owner_user_id = ?2 AND trashed_at IS NULL",
+            params![req.document_id, user_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| "No such document.".to_string())?;
+
+    let (patient_name, patient_dob): (String, Option<String>) = conn
+        .query_row(
+            "SELECT display_name, dob FROM patients WHERE id = ?1 AND owner_user_id = ?2",
+            params![req.patient_id, user_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| "No such patient.".to_string())?;
+
+    validate_date(conn, req.doc_date, &patient_name, patient_dob.as_deref())?;
+
+    let title = req.title.trim();
+    if title.is_empty() {
+        return Err("A document needs a title.".into());
+    }
+
+    let old_path = vault_root.join(old_rel.replace('\\', "/"));
+    let old_name = old_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ext = old_path
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_else(|| match file_kind.as_str() {
+            "pdf" => "pdf".into(),
+            _ => "jpg".into(),
+        });
+
+    let root_len = vault_root.display().to_string().encode_utf16().count() + 1;
+    let probe = naming::build_name(req.doc_date, &patient_name, title, &ext, 1, root_len);
+    let dir_rel = format!("{}\\{}", probe.patient_folder, probe.year_folder);
+    let base = probe
+        .file_name
+        .rsplit_once('.')
+        .map(|(stem, _)| stem.to_string())
+        .unwrap_or_else(|| probe.file_name.clone());
+
+    // Keep the existing suffix when the identity of the slot has not changed.
+    let existing = naming::parse_file_name(&old_name);
+    let unchanged_slot = existing
+        .as_ref()
+        .map(|p| {
+            p.doc_date == req.doc_date
+                && p.patient_slug == probe.patient_folder
+                && format!("{}_{}_{}", p.doc_date, p.patient_slug, p.title) == base
+        })
+        .unwrap_or(false);
+
+    let seq = if unchanged_slot {
+        existing.as_ref().map(|p| p.seq).unwrap_or(1)
+    } else {
+        reserve_seq(conn, &dir_rel, &base)?
+    };
+
+    let built = naming::build_name(req.doc_date, &patient_name, title, &ext, seq, root_len);
+    let new_path = vault_root.join(built.rel_path.replace('\\', "/"));
+
+    if built.rel_path != old_rel {
+        if old_path.exists() {
+            let journal_id = journal_intent(conn, "move", &old_path, &new_path)?;
+            move_file(&old_path, &new_path)?;
+            journal_done(conn, &journal_id)?;
+        }
+        // The sidecar describes the old location and would otherwise be orphaned.
+        crate::backup::remove_sidecar(vault_root, &old_rel);
+    }
+
+    conn.execute(
+        "UPDATE documents
+         SET patient_id = ?2, doc_date = ?3, title = ?4, doc_type = ?5, rel_path = ?6,
+             updated_at = datetime('now')
+         WHERE id = ?1",
+        params![
+            req.document_id,
+            req.patient_id,
+            req.doc_date,
+            title,
+            req.doc_type,
+            built.rel_path,
+        ],
+    )
+    .map_err(|e| format!("cannot update document: {e}"))?;
+
+    let _ = crate::search::index_document(conn, req.document_id);
+    let _ = crate::backup::write_sidecar(conn, vault_root, req.document_id);
+
+    Ok(CommittedDocument {
+        id: req.document_id.to_string(),
         rel_path: built.rel_path,
         file_name: built.file_name,
         title_truncated: built.title_truncated,
@@ -685,6 +830,149 @@ mod tests {
             (i.width(), i.height())
         };
         assert_eq!((w, h), (200, 400), "the filed pixels are upright, not just tagged");
+    }
+
+    #[test]
+    fn editing_a_title_renames_the_file_in_place() {
+        let f = Fx::new("edit-title");
+        let id = f.stage("jpg", b"scan");
+        let doc = f.commit(&id, "2026-03-14", "CBC").unwrap();
+        let before = f.vault().join("Rahim-Uddin").join("2026").join(&doc.file_name);
+        assert!(before.exists());
+
+        let updated = update(&f.conn, &f.user, &f.vault(), UpdateRequest {
+            document_id: &doc.id,
+            patient_id: &f.patient,
+            doc_date: "2026-03-14",
+            title: "Complete Blood Count",
+            doc_type: "report",
+        }).unwrap();
+
+        assert_eq!(updated.file_name, "2026-03-14_Rahim-Uddin_Complete-Blood-Count.jpg");
+        assert!(!before.exists(), "the old name must not linger");
+        let after = f.vault().join("Rahim-Uddin").join("2026").join(&updated.file_name);
+        assert_eq!(std::fs::read(&after).unwrap(), b"scan", "same bytes, new name");
+    }
+
+    #[test]
+    fn correcting_the_date_moves_the_file_to_the_right_year() {
+        let f = Fx::new("edit-date");
+        let id = f.stage("jpg", b"x");
+        let doc = f.commit(&id, "2026-03-14", "CBC").unwrap();
+
+        let updated = update(&f.conn, &f.user, &f.vault(), UpdateRequest {
+            document_id: &doc.id,
+            patient_id: &f.patient,
+            doc_date: "2024-11-28",
+            title: "CBC",
+            doc_type: "report",
+        }).unwrap();
+
+        assert!(updated.rel_path.contains("2024"), "got {}", updated.rel_path);
+        assert!(f.vault().join("Rahim-Uddin").join("2024").join(&updated.file_name).exists());
+        assert!(!f.vault().join("Rahim-Uddin").join("2026").join(&doc.file_name).exists());
+    }
+
+    #[test]
+    fn moving_a_document_to_another_patient_moves_its_folder() {
+        let f = Fx::new("edit-patient");
+        let other = ulid::Ulid::new().to_string();
+        f.conn.execute(
+            "INSERT INTO patients (id, owner_user_id, display_name, folder_slug, created_at, updated_at)
+             VALUES (?1, ?2, 'Karim Uddin', 'Karim-Uddin', datetime('now'), datetime('now'))",
+            params![other, f.user],
+        ).unwrap();
+
+        let id = f.stage("jpg", b"x");
+        let doc = f.commit(&id, "2026-03-14", "CBC").unwrap();
+
+        let updated = update(&f.conn, &f.user, &f.vault(), UpdateRequest {
+            document_id: &doc.id,
+            patient_id: &other,
+            doc_date: "2026-03-14",
+            title: "CBC",
+            doc_type: "report",
+        }).unwrap();
+
+        assert_eq!(updated.file_name, "2026-03-14_Karim-Uddin_CBC.jpg");
+        assert!(f.vault().join("Karim-Uddin").join("2026").join(&updated.file_name).exists());
+        assert!(!f.vault().join("Rahim-Uddin").join("2026").join(&doc.file_name).exists());
+    }
+
+    #[test]
+    fn editing_nothing_does_not_burn_a_collision_suffix() {
+        // Re-reserving on every save would append __02, __03, __04 each time the
+        // user corrected a spelling, and suffixes are never reused.
+        let f = Fx::new("edit-idempotent");
+        let id = f.stage("jpg", b"x");
+        let doc = f.commit(&id, "2026-03-14", "CBC").unwrap();
+
+        for _ in 0..3 {
+            let u = update(&f.conn, &f.user, &f.vault(), UpdateRequest {
+                document_id: &doc.id,
+                patient_id: &f.patient,
+                doc_date: "2026-03-14",
+                title: "CBC",
+                doc_type: "report",
+            }).unwrap();
+            assert_eq!(u.file_name, doc.file_name, "unchanged details must not rename");
+        }
+    }
+
+    #[test]
+    fn an_edit_that_would_be_wrong_is_refused_and_changes_nothing() {
+        let f = Fx::new("edit-refused");
+        f.conn.execute("UPDATE patients SET dob = '1992-03-09' WHERE id = ?1", params![f.patient]).unwrap();
+        let id = f.stage("jpg", b"x");
+        let doc = f.commit(&id, "2026-03-14", "CBC").unwrap();
+
+        let err = update(&f.conn, &f.user, &f.vault(), UpdateRequest {
+            document_id: &doc.id,
+            patient_id: &f.patient,
+            doc_date: "1985-01-01",
+            title: "CBC",
+            doc_type: "report",
+        }).unwrap_err();
+        assert!(err.contains("before"), "got: {err}");
+
+        let still: String = f.conn
+            .query_row("SELECT doc_date FROM documents WHERE id = ?1", params![doc.id], |r| r.get(0))
+            .unwrap();
+        assert_eq!(still, "2026-03-14", "a refused edit must leave the record alone");
+        assert!(f.vault().join("Rahim-Uddin").join("2026").join(&doc.file_name).exists());
+    }
+
+    #[test]
+    fn an_edited_document_stays_searchable_under_its_new_title() {
+        let f = Fx::new("edit-search");
+        let id = f.stage("jpg", b"x");
+        let doc = f.commit(&id, "2026-03-14", "CBC").unwrap();
+
+        update(&f.conn, &f.user, &f.vault(), UpdateRequest {
+            document_id: &doc.id,
+            patient_id: &f.patient,
+            doc_date: "2026-03-14",
+            title: "Thyroid Profile",
+            doc_type: "report",
+        }).unwrap();
+
+        assert_eq!(crate::search::search(&f.conn, &f.user, "thyroid", 10).unwrap().len(), 1);
+        assert!(crate::search::search(&f.conn, &f.user, "CBC", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_blank_title_is_refused() {
+        let f = Fx::new("edit-blank");
+        let id = f.stage("jpg", b"x");
+        let doc = f.commit(&id, "2026-03-14", "CBC").unwrap();
+        let err = update(&f.conn, &f.user, &f.vault(), UpdateRequest {
+            document_id: &doc.id,
+            patient_id: &f.patient,
+            doc_date: "2026-03-14",
+            title: "   ",
+            doc_type: "report",
+        }).unwrap_err();
+        assert!(err.contains("needs a title"), "got: {err}");
     }
 
     #[test]
