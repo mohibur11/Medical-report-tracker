@@ -2,14 +2,17 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { open } from '@tauri-apps/plugin-dialog';
 
+import { BulkBar } from './components/BulkBar.tsx';
 import { CategoryManager, CategoryPicker } from './components/CategoryPicker.tsx';
 import { EditRow } from './components/EditRow.tsx';
 import { ExportPanel } from './components/ExportPanel.tsx';
 import { IDLE_LOCK_MS, LockScreen, LockSettings } from './components/Lock.tsx';
-import { ReviewRow } from './components/ReviewRow.tsx';
+import { ReviewRow, type RowHandle } from './components/ReviewRow.tsx';
 import { Thumb } from './components/Thumb.tsx';
 import { VaultTools } from './components/VaultTools.tsx';
+import { fileEach, summarize } from './lib/bulk.ts';
 import { formatDmy } from './lib/extract/dates.ts';
+import * as selection from './lib/selection.ts';
 import {
   createPatient,
   documentTags,
@@ -18,10 +21,12 @@ import {
   listCategories,
   listDocuments,
   listPatients,
+  listStaged,
   listYears,
   lockState,
   type LockState,
   setDocumentCategories,
+  tagDocuments,
   trashDocument,
   type Category,
   type DbHealth,
@@ -59,6 +64,19 @@ export default function App() {
   const [locked, setLocked] = useState(false);
   /** Which library row is open for editing, if any. */
   const [editingId, setEditingId] = useState<string | null>(null);
+  /** Review-queue multi-select, for the bulk bar. */
+  const [sel, setSel] = useState(selection.EMPTY);
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkStatus, setBulkStatus] = useState<string | null>(null);
+
+  /** Live handles onto the review rows, so the bulk bar can drive them. */
+  const rows = useRef(new Map<string, RowHandle>());
+  const registerRow = useCallback((id: string, handle: RowHandle | null) => {
+    if (handle) rows.current.set(id, handle);
+    else rows.current.delete(id);
+  }, []);
+  /** Set while a bulk file runs, so 200 commits do not trigger 200 refreshes. */
+  const bulkRunning = useRef(false);
 
   const refreshLock = useCallback(() => {
     lockState().then((s) => {
@@ -99,10 +117,21 @@ export default function App() {
     listPatients().then(setPatients, fail);
     listYears().then(setYears, fail);
     listCategories().then(setCategories, fail);
-    listDocuments().then((rows) => {
+
+    // Fetched together because the opening view depends on both: files waiting to
+    // be reviewed outrank a library that is already filed.
+    Promise.all([listDocuments(), listStaged()]).then(([rows, staged]) => {
       setDocs(rows);
+      // The queue is reloaded rather than remembered, so committing a row cannot
+      // leave the screen disagreeing with the vault. Rows that were rejected on
+      // the way in are not stored as reviewable, so they are carried over here
+      // instead of vanishing at the first refresh.
+      setItems((prev) => [
+        ...staged,
+        ...prev.filter((i) => i.status === 'failed' || i.status === 'duplicate'),
+      ]);
       setViewChosen((chosen) => {
-        if (!chosen && rows.length > 0) setView('library');
+        if (!chosen && staged.length === 0 && rows.length > 0) setView('library');
         return true;
       });
       documentTags(rows.map((r) => r.id)).then((pairs) => {
@@ -133,7 +162,7 @@ export default function App() {
     setError(null);
     try {
       const staged = await importFiles(paths);
-      setItems((prev) => [...staged, ...prev]);
+      setItems((prev) => [...staged, ...prev.filter((i) => !staged.some((s) => s.id === i.id))]);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -198,11 +227,68 @@ export default function App() {
     // Carry the patient to the next row. Re-picking per file does not survive a
     // backlog import.
     setLastPatientId(patientId);
-    refresh();
+    if (!bulkRunning.current) refresh();
   }
 
   const pending = items.filter((i) => i.status === 'needs_date' || i.status === 'pending');
   const rejected = items.filter((i) => i.status === 'failed' || i.status === 'duplicate');
+  const pendingIds = pending.map((i) => i.id);
+  const pendingKey = pendingIds.join(',');
+
+  // Filed rows leave the queue; a selection still holding them would make the
+  // count lie and aim the next bulk action at nothing.
+  useEffect(() => {
+    setSel((prev) => selection.prune(prev, pendingKey ? pendingKey.split(',') : []));
+  }, [pendingKey]);
+
+  const applyToSelected = (fn: (api: RowHandle['current']) => void) => {
+    for (const id of selection.ordered(sel, pendingIds)) {
+      const handle = rows.current.get(id);
+      if (handle) fn(handle.current);
+    }
+  };
+
+  /**
+   * File every selected row, one at a time.
+   *
+   * Sequential on purpose: each commit reserves a collision suffix and moves a
+   * file through the journal, and firing three hundred of those at once buys
+   * nothing but contention. Rows that are not ready are skipped and named, never
+   * filed with a guess.
+   */
+  async function fileSelected(categoryIds: string[]) {
+    const ids = selection.ordered(sel, pendingIds);
+    const nameOf = new Map(pending.map((i) => [i.id, i.fileName]));
+    setBulkBusy(true);
+    setBulkStatus(null);
+    setError(null);
+    bulkRunning.current = true;
+
+    let outcome = { filed: [] as string[], skipped: [] as { name: string; reason: string }[] };
+    try {
+      outcome = await fileEach(
+        ids,
+        (id) => {
+          const handle = rows.current.get(id);
+          return handle ? { name: nameOf.get(id) ?? id, target: handle.current } : null;
+        },
+        (done, total) => setBulkStatus(`filing ${done} of ${total}…`),
+      );
+
+      // Tagging waits until the documents exist; an ingest item has no row to tag.
+      for (const categoryId of categoryIds) {
+        if (outcome.filed.length > 0) await tagDocuments(outcome.filed, categoryId);
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      bulkRunning.current = false;
+      setBulkBusy(false);
+      refresh();
+    }
+
+    setBulkStatus(summarize(outcome));
+  }
 
   if (locked) {
     return (
@@ -381,6 +467,21 @@ The file is not deleted — it moves to the Trash folder inside your vault, and 
           </div>
         ) : (
           <>
+            {pending.length > 1 && (
+              <BulkBar
+                selectedCount={sel.ids.size}
+                allChecked={selection.allSelected(sel, pendingIds)}
+                onToggleAll={() => setSel((prev) => selection.toggleAll(prev, pendingIds))}
+                patients={patients}
+                categories={categories}
+                onApplyPatient={(id) => applyToSelected((api) => api.setPatient(id))}
+                onApplyType={(t) => applyToSelected((api) => api.setDocType(t))}
+                onFile={(categoryIds) => void fileSelected(categoryIds)}
+                busy={bulkBusy}
+                status={bulkStatus}
+              />
+            )}
+
             {pending.length > 0 && (
               <ul className="divide-y divide-slate-100 dark:divide-slate-800">
                 {pending.map((it) => (
@@ -389,6 +490,11 @@ The file is not deleted — it moves to the Trash folder inside your vault, and 
                     item={it}
                     patients={patients}
                     defaultPatientId={lastPatientId}
+                    selected={sel.ids.has(it.id)}
+                    onToggle={(shift) =>
+                      setSel((prev) => selection.click(prev, pendingIds, it.id, shift))
+                    }
+                    onRegister={registerRow}
                     onCommitted={onCommitted}
                   />
                 ))}

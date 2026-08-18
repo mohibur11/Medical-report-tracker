@@ -37,6 +37,18 @@ pub enum IngestStatus {
 }
 
 impl IngestStatus {
+    /// Anything unrecognised is treated as pending — a row whose status could not
+    /// be read still has a file behind it, and hiding it would strand that file.
+    fn parse(s: &str) -> Self {
+        match s {
+            "extracted" => IngestStatus::Extracted,
+            "needs_date" => IngestStatus::NeedsDate,
+            "duplicate" => IngestStatus::Duplicate,
+            "failed" => IngestStatus::Failed,
+            _ => IngestStatus::Pending,
+        }
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             IngestStatus::Pending => "pending",
@@ -69,6 +81,64 @@ pub struct IngestItem {
     /// the difference between an upright export and a sideways one.
     pub orientation_baked: bool,
     pub thumb_path: Option<String>,
+}
+
+/// Staged files that were never committed.
+///
+/// The review queue lives in the database, not in the window. Closing the app
+/// forty files into a sixty-photo import must not strand the other twenty in
+/// staging with nothing in the UI pointing at them.
+pub fn list_staged(conn: &Connection, user_id: &str) -> Result<Vec<IngestItem>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, batch_id, src_path, status, error, file_kind, sha256,
+                    byte_size, page_count, exif_orientation
+               FROM ingest_items
+              WHERE owner_user_id = ?1
+                AND document_id IS NULL
+                AND staged_path IS NOT NULL
+                AND status IN ('pending', 'extracted', 'needs_date')
+              -- Newest batch first, but drop order within a batch, which is the
+              -- order the files were handed over in.
+              ORDER BY created_at DESC, id ASC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(params![user_id], |r| {
+            let src_path: String = r.get(2)?;
+            let status: String = r.get(3)?;
+            let kind: Option<String> = r.get(5)?;
+            let exif_orientation: Option<u16> = r.get(9)?;
+
+            Ok(IngestItem {
+                id: r.get(0)?,
+                batch_id: r.get(1)?,
+                file_name: Path::new(&src_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| src_path.clone()),
+                src_path,
+                status: IngestStatus::parse(&status),
+                error: r.get(4)?,
+                file_kind: kind.as_deref().map_or(FileKind::Unknown, FileKind::parse),
+                sha256: r.get(6)?,
+                byte_size: r.get(7)?,
+                // Pixel dimensions are not stored — they are only ever used at the
+                // moment of ingest, to decide whether to downscale.
+                width: None,
+                height: None,
+                page_count: r.get(8)?,
+                exif_orientation,
+                // Derived rather than stored: a bake happens exactly when the tag
+                // said anything other than upright.
+                orientation_baked: exif_orientation.is_some_and(|o| o != 1),
+                thumb_path: None,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -359,6 +429,99 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn the_review_queue_survives_closing_the_app() {
+        let f = Fixture::new("relist");
+        let a = f.write("one.jpg", &jpeg_with_orientation(300, 200, 1));
+        let b = f.write("two.jpg", &jpeg_with_orientation(200, 300, 6));
+        let staged = f.stage(&[a, b]);
+        assert_eq!(staged.len(), 2);
+
+        // Nothing in memory — this is what a fresh launch sees.
+        let back = list_staged(&f.conn, &f.user).unwrap();
+        assert_eq!(back.len(), 2, "both files are still waiting to be reviewed");
+        assert_eq!(
+            back.iter().map(|i| i.file_name.as_str()).collect::<Vec<_>>(),
+            vec!["one.jpg", "two.jpg"],
+            "drop order within a batch is preserved",
+        );
+
+        // Derived from the stored EXIF tag rather than remembered, so the note
+        // explaining why the pixels changed does not disappear on restart.
+        let rotated = back.iter().find(|i| i.file_name == "two.jpg").unwrap();
+        assert!(rotated.orientation_baked, "the rotated photo still says so");
+        assert!(!back.iter().find(|i| i.file_name == "one.jpg").unwrap().orientation_baked);
+    }
+
+    #[test]
+    fn a_filed_document_leaves_the_queue() {
+        let f = Fixture::new("filed");
+        let src = f.write("report.jpg", &jpeg_with_orientation(300, 200, 1));
+        let items = f.stage(&[src]);
+
+        // A real document row, because the queue is excluded by the foreign key
+        // pointing at one — not by the status text alone.
+        f.conn
+            .execute(
+                "INSERT INTO patients (id, owner_user_id, display_name, folder_slug, created_at, updated_at)
+                 VALUES ('pat', ?1, 'A Patient', 'A-Patient', datetime('now'), datetime('now'))",
+                params![f.user],
+            )
+            .unwrap();
+        f.conn
+            .execute(
+                "INSERT INTO documents
+                   (id, owner_user_id, patient_id, doc_date, date_source, title, doc_type,
+                    rel_path, sha256, byte_size, file_kind, created_at, updated_at)
+                 VALUES ('doc', ?1, 'pat', '2026-01-02', 'manual', 'Report', 'report',
+                         'A-Patient/2026/x.jpg', 'sha', 10, 'jpeg', datetime('now'), datetime('now'))",
+                params![f.user],
+            )
+            .unwrap();
+        f.conn
+            .execute(
+                "UPDATE ingest_items SET document_id = 'doc', status = 'committed' WHERE id = ?1",
+                params![items[0].id],
+            )
+            .unwrap();
+
+        assert!(
+            list_staged(&f.conn, &f.user).unwrap().is_empty(),
+            "a committed file must not come back as still needing review",
+        );
+    }
+
+    #[test]
+    fn rejected_files_do_not_come_back_as_reviewable() {
+        let f = Fixture::new("rejected");
+        let src = f.write("scan.jpg", &jpeg_with_orientation(300, 200, 1));
+        let items = f.stage(&[src]);
+
+        // Duplicates and failures are reported once, at the moment of import.
+        // Returning them forever would grow a permanent list of things the user
+        // has no action to take on.
+        f.conn
+            .execute(
+                "UPDATE ingest_items SET status = 'duplicate' WHERE id = ?1",
+                params![items[0].id],
+            )
+            .unwrap();
+
+        assert!(list_staged(&f.conn, &f.user).unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_queue_belongs_to_its_owner() {
+        let f = Fixture::new("owner");
+        let src = f.write("mine.jpg", &jpeg_with_orientation(300, 200, 1));
+        f.stage(&[src]);
+
+        assert!(
+            list_staged(&f.conn, "01OTHERUSER0000000000000000").unwrap().is_empty(),
+            "the queue is scoped to the owner from the first migration onward",
+        );
     }
 
     #[test]

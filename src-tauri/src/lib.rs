@@ -50,6 +50,14 @@ async fn import_files(
     ingest::stage_batch(&conn, &user.0, &staging, &paths_in)
 }
 
+/// The review queue as the database has it, so a half-finished import survives
+/// closing the app.
+#[tauri::command]
+fn list_staged(state: State<'_, Db>, user: State<'_, CurrentUser>) -> Result<Vec<IngestItem>, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    ingest::list_staged(&conn, &user.0)
+}
+
 #[tauri::command]
 fn list_patients(state: State<'_, Db>, user: State<'_, CurrentUser>) -> Result<Vec<patients::Patient>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
@@ -99,8 +107,23 @@ fn commit_item(
 /// of it happens in the review grid, where the user can see and correct the choice.
 #[tauri::command]
 async fn run_ocr(state: State<'_, Db>, ingest_id: String) -> Result<Vec<ocr::OcrPage>, String> {
+    // Recognition costs roughly a third of a second per page and must not hold the
+    // database lock while it runs. A backlog import opens a queue of hundreds of
+    // rows at once, and every other command — list, commit, search — would sit
+    // behind them.
+    let target = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        ocr::staged_target(&conn, &ingest_id)?
+    };
+    if let Some(pages) = target.cached {
+        return Ok(pages);
+    }
+
+    let pages = ocr::recognize_file(&target.path, &target.kind)?;
+
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    ocr::recognize_staged(&conn, &ingest_id)
+    ocr::store_ocr(&conn, &ingest_id, &pages)?;
+    Ok(pages)
 }
 
 #[tauri::command]
@@ -381,6 +404,20 @@ fn staged_thumb(app: AppHandle, id: String) -> Result<Option<String>, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must be registered before anything else: a second launch has to be
+        // turned away before it opens the database, replays the journal, or
+        // starts moving files the first copy is already moving.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            use tauri::Manager;
+            // Someone tried to open the app again — almost always by
+            // double-clicking the shortcut. Show them the window they already
+            // have rather than doing nothing.
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle();
@@ -459,6 +496,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             db_health,
             import_files,
+            list_staged,
             staged_thumb,
             list_patients,
             create_patient,

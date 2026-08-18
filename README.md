@@ -8,7 +8,12 @@ to bottom**.
 
 Windows first. Web and Android later.
 
-**Status: Phase 1 in progress.** Not usable yet. See [docs/phase-0-findings.md](docs/phase-0-findings.md).
+**Status: usable.** Ingest, review, filing, categories, search, backup, editing and
+merged-PDF export all work; recognition pre-fills the review screen. See
+[docs/testing.md](docs/testing.md) for a walkthrough and
+[docs/phase-0-findings.md](docs/phase-0-findings.md) for what was measured.
+
+Still open: patient rename, malformed-PDF repair, code signing.
 
 ## Requirements
 

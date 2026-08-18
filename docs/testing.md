@@ -77,6 +77,26 @@ Things it should ask about rather than decide:
 - **a date of birth that disagrees** with the patient profile
 - **two dates it could barely separate**
 
+#### Reviewing a backlog rather than a handful
+
+Two files or more and a bar appears above the queue. It exists because a 200-file
+import is not 200 small decisions — it is a few decisions repeated.
+
+- **Select all**, or tick rows individually. **Shift-click** takes the whole run
+  between the last row you ticked and this one.
+- **Set patient** and **Set type** apply to everything selected at once. Date is
+  deliberately not there: a wrong date is the one mistake that never announces
+  itself, so it stays per-row.
+- **+ tag** chooses categories to apply once the files land.
+- **File selected** files them one at a time and then says what it did — including
+  which rows it left behind and why (`no patient chosen`, `no date`, and so on).
+  Rows that are not ready are never filed with a guess, and one failure does not
+  abandon the rest of the batch.
+
+The queue is stored, not remembered. Close the app halfway through a big import,
+reopen it, and the remaining files are still there with their recognised text
+intact — nothing is stranded in staging.
+
 ### 4. Library
 
 - **Search** titles, notes and recognised text. Try a word from inside a scan —
@@ -114,7 +134,7 @@ of birth ever chosen, ~500 ms per page. Receipts, radiology, pathology and
 immunology reports all classified correctly.
 
 **Not verified by me**, because I cannot drive the mouse: the drag-and-drop handler,
-the File button, and Create PDF. Everything behind them is covered by tests, but
+the File button, the review checkboxes and bulk bar, and Create PDF. Everything behind them is covered by tests, but
 those three clicks are exactly what to try first.
 
 Also unverified: how the exported PDF actually *looks*. The tests assert page size,

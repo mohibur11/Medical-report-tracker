@@ -23,6 +23,19 @@ pub enum FileKind {
 }
 
 impl FileKind {
+    /// Read back what `sniff` decided, as stored in `ingest_items.file_kind`.
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "jpeg" => FileKind::Jpeg,
+            "png" => FileKind::Png,
+            "pdf" => FileKind::Pdf,
+            "heic" => FileKind::Heic,
+            "tiff" => FileKind::Tiff,
+            "webp" => FileKind::Webp,
+            _ => FileKind::Unknown,
+        }
+    }
+
     /// Vault extension. Deliberately does not round-trip the source extension —
     /// a JPEG named `.pdf` becomes `.jpg`.
     pub fn extension(self) -> &'static str {

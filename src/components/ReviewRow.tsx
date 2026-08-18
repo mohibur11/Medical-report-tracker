@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { Thumb } from './Thumb.tsx';
 import { detectConflicts, isBlocked, type Conflict } from '../lib/extract/conflicts.ts';
@@ -6,6 +6,7 @@ import { formatDmy, parseDmyInput, rankDateCandidates, type DateCandidate } from
 import { describe as describeDocument, type Suggestion } from '../lib/extract/lexicon.ts';
 import { buildName } from '../lib/naming/sanitize.ts';
 import { commitItem, runOcr, type IngestItem, type Patient } from '../lib/ipc.ts';
+import { ocrQueue } from '../lib/queue.ts';
 
 /**
  * One row of the review queue: confirm what this file is, then file it.
@@ -15,15 +16,42 @@ import { commitItem, runOcr, type IngestItem, type Patient } from '../lib/ipc.ts
  * seconds the whole app stops being worth using — and a round trip per keystroke
  * would make the preview lag the typing.
  */
+/**
+ * What the bulk bar is allowed to do to a row it does not own.
+ *
+ * Patient and type can be set for a whole batch; the date deliberately cannot.
+ * A wrong date is the one failure that never announces itself — it produces a
+ * subtly misordered PDF handed to a doctor — so it stays a per-row decision.
+ */
+export interface RowApi {
+  ready: boolean;
+  /** Why this row would be skipped by a bulk file, in words. */
+  skipReason: string | null;
+  setPatient: (id: string) => void;
+  setDocType: (t: string) => void;
+  /** Resolves to the new document id, or null if the row refused to file. */
+  file: () => Promise<string | null>;
+}
+
+/** Read at call time, so the bulk bar never acts on a stale closure. */
+export type RowHandle = { current: RowApi };
+
 export function ReviewRow({
   item,
   patients,
   defaultPatientId,
+  selected,
+  onToggle,
+  onRegister,
   onCommitted,
 }: {
   item: IngestItem;
   patients: Patient[];
   defaultPatientId: string | null;
+  selected: boolean;
+  onToggle: (shift: boolean) => void;
+  /** null on unmount. */
+  onRegister: (id: string, handle: RowHandle | null) => void;
   /** Reports the chosen patient so the next row can default to it — a backlog
    *  import is almost always one person at a time. */
   onCommitted: (id: string, fileName: string, patientId: string) => void;
@@ -51,9 +79,12 @@ export function ReviewRow({
     if (item.status === 'failed' || item.status === 'duplicate') return;
     let alive = true;
     setReading(true);
-    runOcr(item.id).then(
+    // Through the queue, not straight to the backend: a backlog import mounts
+    // every row at once, and a row the user has already scrolled past should not
+    // hold a recognition slot.
+    ocrQueue.run(() => (alive ? runOcr(item.id) : Promise.resolve(null))).then(
       (pages) => {
-        if (!alive) return;
+        if (!alive || !pages) return;
         setReading(false);
 
         // Rank across the whole document. A twelve-page report carries its date
@@ -115,8 +146,8 @@ export function ReviewRow({
         )
       : null;
 
-  async function file() {
-    if (!patient || !title.trim()) return;
+  async function file(): Promise<string | null> {
+    if (!patient || !title.trim()) return null;
     setBusy(true);
     setError(null);
     try {
@@ -128,18 +159,57 @@ export function ReviewRow({
         docType,
       });
       onCommitted(item.id, doc.fileName, patient.id);
+      return doc.id;
     } catch (e) {
       setError(String(e));
       setBusy(false);
+      return null;
     }
   }
+
+  // Said in the words the row would use itself, so a bulk file can report
+  // exactly what it left behind instead of a bare count.
+  const skipReason = !patient
+    ? 'no patient chosen'
+    : !title.trim()
+      ? 'no title'
+      : !iso
+        ? date.trim()
+          ? 'date not understood'
+          : 'no date'
+        : blocked
+          ? (conflicts.find((c) => c.severity === 'blocking')?.message ?? 'needs checking')
+          : null;
+
+  // A ref, not a value: the bulk bar reads this when it acts, by which point
+  // several rows may have re-rendered.
+  const handle = useRef<RowApi>({} as RowApi);
+  handle.current = { ready, skipReason, setPatient: setPatientId, setDocType, file };
+
+  useEffect(() => {
+    onRegister(item.id, handle);
+    return () => onRegister(item.id, null);
+  }, [item.id, onRegister]);
 
   const input =
     'rounded border border-slate-300 bg-white px-2 py-1 text-sm outline-none ' +
     'focus:border-sky-500 dark:border-slate-600 dark:bg-slate-800';
 
   return (
-    <li className="flex items-start gap-4 px-6 py-3">
+    <li
+      className={`flex items-start gap-4 px-6 py-3 ${
+        selected ? 'bg-sky-50 dark:bg-sky-950/40' : ''
+      }`}
+    >
+      <input
+        type="checkbox"
+        checked={selected}
+        // Shift-range needs the modifier, which `onChange` does not carry.
+        onChange={() => {}}
+        onClick={(e) => onToggle(e.shiftKey)}
+        aria-label={`Select ${item.fileName}`}
+        className="mt-1 size-4 shrink-0 accent-sky-600"
+      />
       <Thumb id={item.id} kind={item.fileKind} />
 
       <div className="min-w-0 flex-1">

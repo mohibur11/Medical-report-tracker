@@ -50,6 +50,15 @@ export const importFiles = (paths: string[]): Promise<IngestItem[]> =>
 export const stagedThumb = (id: string): Promise<string | null> =>
   invoke('staged_thumb', { id });
 
+/**
+ * The review queue as stored, not as remembered.
+ *
+ * Staging is durable, so a backlog import that was closed halfway through comes
+ * back on the next launch instead of leaving files stranded with nothing
+ * pointing at them.
+ */
+export const listStaged = (): Promise<IngestItem[]> => invoke('list_staged');
+
 export interface Patient {
   id: string;
   displayName: string;

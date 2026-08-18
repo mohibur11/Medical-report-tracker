@@ -14,9 +14,9 @@
 //! "Test TSH FT3 FT 4 Result 6.82 2.91 0.88", column association destroyed. Word
 //! boxes are therefore captured too, so anything needing geometry later has it.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct OcrWord {
     pub text: String,
@@ -26,7 +26,9 @@ pub struct OcrWord {
     pub h: f32,
 }
 
-#[derive(Debug, Serialize, Default)]
+// Deserialize as well as Serialize: the stored ocr_json is read back as a cache,
+// so a page is never recognised twice.
+#[derive(Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct OcrPage {
     /// Reading-order text. Layout is flattened; use `words` when geometry matters.
@@ -242,32 +244,60 @@ fn page_number_of(file_name: &str) -> Option<usize> {
 /// Stored rather than returned-and-forgotten so that closing the app mid-review
 /// does not discard ~350 ms of work per page — the same reason the staging table
 /// is durable in the first place.
-pub fn recognize_staged(
-    conn: &rusqlite::Connection,
-    ingest_id: &str,
-) -> Result<Vec<OcrPage>, String> {
+/// Everything recognition needs, so the caller can drop the database lock before
+/// spending a third of a second per page holding it.
+pub struct StagedTarget {
+    /// Already recognised once. Returned as-is rather than read again.
+    pub cached: Option<Vec<OcrPage>>,
+    pub path: std::path::PathBuf,
+    pub kind: String,
+}
+
+pub fn staged_target(conn: &rusqlite::Connection, ingest_id: &str) -> Result<StagedTarget, String> {
     use rusqlite::params;
 
-    let (staged, kind): (Option<String>, String) = conn
+    let (staged, kind, json): (Option<String>, String, Option<String>) = conn
         .query_row(
-            "SELECT staged_path, file_kind FROM ingest_items WHERE id = ?1",
+            "SELECT staged_path, file_kind, ocr_json FROM ingest_items WHERE id = ?1",
             params![ingest_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .map_err(|e| format!("no such staged item: {e}"))?;
 
     let path = staged.ok_or("that file is no longer staged")?;
-    let path = std::path::Path::new(&path);
 
-    let pages = if kind == "pdf" {
+    // A staged file never changes, so its text never does either. Without this a
+    // backlog import re-reads every page each time the queue is reopened.
+    let cached = json
+        .as_deref()
+        .and_then(|j| serde_json::from_str::<Vec<OcrPage>>(j).ok())
+        .filter(|pages| !pages.is_empty());
+
+    Ok(StagedTarget {
+        cached,
+        path: std::path::PathBuf::from(path),
+        kind,
+    })
+}
+
+pub fn recognize_file(path: &std::path::Path, kind: &str) -> Result<Vec<OcrPage>, String> {
+    if kind == "pdf" {
         let work = path.with_extension("pages");
         let result = recognize_pdf(path, &work);
         // The extracted page images are scratch; the text is what is kept.
         let _ = std::fs::remove_dir_all(&work);
-        result?
+        result
     } else {
-        vec![recognize(path)?]
-    };
+        Ok(vec![recognize(path)?])
+    }
+}
+
+pub fn store_ocr(
+    conn: &rusqlite::Connection,
+    ingest_id: &str,
+    pages: &[OcrPage],
+) -> Result<(), String> {
+    use rusqlite::params;
 
     // One field for ranking and search, one for geometry, both keyed by page.
     let combined = pages
@@ -283,11 +313,27 @@ pub fn recognize_staged(
         params![
             ingest_id,
             combined,
-            serde_json::to_string(&pages).unwrap_or_default()
+            serde_json::to_string(pages).unwrap_or_default()
         ],
     )
     .map_err(|e| format!("cannot store recognised text: {e}"))?;
 
+    Ok(())
+}
+
+/// The three steps composed. The command splits them so it can drop the database
+/// lock while recognising; the tests want the whole path in one call.
+#[cfg(test)]
+pub fn recognize_staged(
+    conn: &rusqlite::Connection,
+    ingest_id: &str,
+) -> Result<Vec<OcrPage>, String> {
+    let target = staged_target(conn, ingest_id)?;
+    if let Some(pages) = target.cached {
+        return Ok(pages);
+    }
+    let pages = recognize_file(&target.path, &target.kind)?;
+    store_ocr(conn, ingest_id, &pages)?;
     Ok(pages)
 }
 
@@ -429,6 +475,83 @@ mod tests {
         assert_eq!(page_number_of("a_b_c_07_img2.png"), Some(7), "underscores in the stem");
         assert_eq!(page_number_of("notours.jpg"), None);
         assert_eq!(page_number_of("scan_x_img0.jpg"), None, "page must be numeric");
+    }
+
+    /// Set up one staged row pointing at `path`, and hand back its connection.
+    fn staged_row(name: &str, path: &std::path::Path, kind: &str) -> (rusqlite::Connection, String) {
+        let dir = std::env::temp_dir().join(format!("mrt-ocrdb-{name}-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = crate::db::open(&dir.join("app.db")).unwrap();
+        let user = crate::db::ensure_user(&conn).unwrap();
+        let id = ulid::Ulid::new().to_string();
+        conn.execute(
+            "INSERT INTO ingest_items
+               (id, owner_user_id, batch_id, src_path, staged_path, status, file_kind,
+                created_at, updated_at)
+             VALUES (?1, ?2, 'batch', ?3, ?3, 'pending', ?4, datetime('now'), datetime('now'))",
+            rusqlite::params![id, user, path.to_string_lossy(), kind],
+        )
+        .unwrap();
+        (conn, id)
+    }
+
+    #[test]
+    fn a_page_is_never_recognised_twice() {
+        let dir = std::env::temp_dir().join(format!("mrt-ocrcache-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("page.jpg");
+        text_image(&img);
+
+        let (conn, id) = staged_row("cache", &img, "jpeg");
+        let first = recognize_staged(&conn, &id).expect("first read");
+        assert!(!first.is_empty(), "the page should produce at least one entry");
+
+        // Deleting the file proves the second call never touched it. Recognition
+        // costs about a third of a second a page; a backlog import reopening the
+        // queue must not pay that again.
+        std::fs::remove_file(&img).unwrap();
+        let second = recognize_staged(&conn, &id).expect("second read comes from the cache");
+        assert_eq!(
+            second.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
+            first.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
+            "the cached text must match what was recognised",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_cache_is_not_treated_as_a_result() {
+        let dir = std::env::temp_dir().join(format!("mrt-ocrempty-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = dir.join("page.jpg");
+        text_image(&img);
+
+        let (conn, id) = staged_row("empty", &img, "jpeg");
+        // A page that read as nothing must be retried, not remembered as done.
+        conn.execute(
+            "UPDATE ingest_items SET ocr_json = '[]' WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .unwrap();
+
+        let target = staged_target(&conn, &id).unwrap();
+        assert!(target.cached.is_none(), "an empty result is not a cache hit");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_staged_file_that_vanished_before_any_read_says_so() {
+        let dir = std::env::temp_dir().join(format!("mrt-ocrgone-{}", ulid::Ulid::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("gone.jpg");
+
+        let (conn, id) = staged_row("gone", &missing, "jpeg");
+        let err = recognize_staged(&conn, &id).expect_err("nothing to read");
+        assert!(!err.is_empty(), "the failure must be explained, not silent");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A multi-page scanned PDF is the shape this archive is actually made of:

@@ -51,6 +51,10 @@ base64 = "0.22"
 # severs a combining mark.
 unicode-normalization = "0.1"
 unicode-segmentation = "1"
+# One window, one database. SQLite in WAL mode tolerates a second connection, but
+# a second copy of the app means two review queues, two journal replays and two
+# processes racing to move the same files. A second launch focuses the first.
+tauri-plugin-single-instance = "2.4.3"
 
 # Windows.Media.Ocr — the recognizer already built into Windows 10/11. Zero bundle
 # cost and fully offline. Measured in the Phase 0 spike at ~350 ms per A4 page.
