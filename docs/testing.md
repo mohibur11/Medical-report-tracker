@@ -50,6 +50,29 @@ Watch for:
 
 `tests/fixtures/photos/` has files built to exercise exactly these.
 
+#### A PDF that asks for a password
+
+Labs and hospitals routinely email reports locked with a date of birth or a phone
+number. One of those lands in the queue on an amber strip, with a password box,
+and stays there across restarts — it is counted as `1 locked` in the header.
+Nothing can read it until it is unlocked: not the recognizer, not the export.
+
+Enter the password and it becomes an ordinary row, with its real page count. A
+wrong password says so and leaves the file exactly as it was.
+
+Worth knowing what is *not* built, and why: no separate repair tool. pdfcpu already
+rebuilds damaged PDFs by itself — a wrong `startxref` offset, a missing
+cross-reference table, a file truncated to a third of its length all come back
+readable, and it says `pdfcpu repaired: catalog` when it does. Bundling qpdf for
+that would be dead weight. A password is the one thing repair cannot substitute
+for.
+
+For the same reason, a PDF that the strict validator dislikes is still accepted at
+import: the operations that matter — resize, stamp, merge — succeed on files
+`pdfcpu info` complains about, so refusing the import on that basis would refuse
+real scans. If a file genuinely cannot be read, the export says so per document
+and still produces the rest.
+
 ### 3. Review
 
 Each row reads its page and pre-fills what it found. This is the screen the whole

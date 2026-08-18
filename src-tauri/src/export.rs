@@ -318,6 +318,82 @@ fn recode(src: &Path, dst: &Path, long_edge: u32, quality: u8, grayscale: bool) 
     Ok(())
 }
 
+/// What happened when pdfcpu was asked to open this PDF.
+///
+/// Worth distinguishing, because the three outcomes need three different things
+/// from the user. pdfcpu repairs structural damage by itself — a wrong startxref
+/// offset, a missing xref table, a truncated tail all come back readable — so
+/// "broken PDF" in practice means either a password or a file that is not a PDF.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PdfState {
+    Readable { pages: u32 },
+    /// Needs a password. No amount of repair substitutes for one.
+    Locked,
+    /// `info` refused it. NOT a reason to reject the file: `info` validates the
+    /// whole document against the specification, while the operations this app
+    /// actually performs — resize, stamp, merge, extract — rebuild what they need
+    /// and succeed on files `info` complains about. Measured: a PDF with a
+    /// deliberately broken cross-reference table fails `info` and resizes fine.
+    Questionable(String),
+}
+
+pub fn probe_pdf(exe: &Path, pdf: &Path) -> PdfState {
+    match run_pdfcpu(exe, &["info", "--json", &pdf.to_string_lossy()]) {
+        Ok(json) => {
+            let pages = serde_json::from_str::<serde_json::Value>(&json)
+                .ok()
+                .and_then(|v| v["infos"][0]["pageCount"].as_u64())
+                .unwrap_or(1) as u32;
+            PdfState::Readable { pages }
+        }
+        Err(e) if is_password_error(&e) => PdfState::Locked,
+        Err(e) => PdfState::Questionable(e),
+    }
+}
+
+/// pdfcpu says "please provide the correct password" for both a missing password
+/// and a wrong one.
+pub fn is_password_error(message: &str) -> bool {
+    let m = message.to_ascii_lowercase();
+    m.contains("password") || m.contains("encrypt")
+}
+
+/// Remove password protection in place, so everything downstream can read it.
+///
+/// The password is passed as an argument because pdfcpu takes it no other way; it
+/// is therefore briefly visible to anything that can list processes on this
+/// machine. That is an acceptable trade for a local single-user app, and worth
+/// knowing before this is ever reused somewhere it is not.
+pub fn decrypt_pdf(exe: &Path, pdf: &Path, password: &str) -> Result<(), String> {
+    let unlocked = pdf.with_extension("unlocked.pdf");
+    let _ = std::fs::remove_file(&unlocked);
+
+    run_pdfcpu(
+        exe,
+        &[
+            "decrypt",
+            "--upw",
+            password,
+            "--opw",
+            password,
+            &pdf.to_string_lossy(),
+            &unlocked.to_string_lossy(),
+        ],
+    )
+    .map_err(|e| {
+        if is_password_error(&e) {
+            "That password did not open the file.".to_string()
+        } else {
+            e
+        }
+    })?;
+
+    // Replace only once the unlocked copy exists, so a failure leaves the
+    // original exactly as it was.
+    std::fs::rename(&unlocked, pdf).map_err(|e| format!("cannot replace the locked file: {e}"))?;
+    Ok(())
+}
+
 pub fn page_count(exe: &Path, pdf: &Path) -> u32 {
     run_pdfcpu(exe, &["info", "--json", &pdf.to_string_lossy()])
         .ok()
@@ -358,6 +434,10 @@ pub fn build(
                 prepared.push((p, bytes));
             }
             // One unreadable file must not cost the export. Report it instead.
+            Err(e) if is_password_error(&e) => missing.push(format!(
+                "{} — password protected. Unlock it in the inbox, then export again.",
+                doc.title
+            )),
             Err(e) => missing.push(format!("{} — {e}", doc.title)),
         }
     }

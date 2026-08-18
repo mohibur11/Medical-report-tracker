@@ -7,6 +7,7 @@ import { CategoryManager, CategoryPicker } from './components/CategoryPicker.tsx
 import { EditRow } from './components/EditRow.tsx';
 import { ExportPanel } from './components/ExportPanel.tsx';
 import { IDLE_LOCK_MS, LockScreen, LockSettings } from './components/Lock.tsx';
+import { LockedRow } from './components/LockedRow.tsx';
 import { PatientsPanel } from './components/PatientsPanel.tsx';
 import { ReviewRow, type RowHandle } from './components/ReviewRow.tsx';
 import { Thumb } from './components/Thumb.tsx';
@@ -232,6 +233,8 @@ export default function App() {
   }
 
   const pending = items.filter((i) => i.status === 'needs_date' || i.status === 'pending');
+  // Named for the PDFs, not the app lock — `locked` is already the screen lock.
+  const lockedPdfs = items.filter((i) => i.status === 'locked');
   const rejected = items.filter((i) => i.status === 'failed' || i.status === 'duplicate');
   const pendingIds = pending.map((i) => i.id);
   const pendingKey = pendingIds.join(',');
@@ -322,7 +325,9 @@ export default function App() {
                 }`}
               >
                 {v}
-                {v === 'inbox' && pending.length > 0 && ` (${pending.length})`}
+                {v === 'inbox' &&
+                  pending.length + lockedPdfs.length > 0 &&
+                  ` (${pending.length + lockedPdfs.length})`}
                 {v === 'library' && docs.length > 0 && ` (${docs.length})`}
               </button>
             ))}
@@ -343,7 +348,13 @@ export default function App() {
           </button>
         </div>
         <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-          {pending.length} to review · {docs.length} filed · {patients.length} patient
+          {pending.length} to review
+          {lockedPdfs.length > 0 && (
+            <span className="ml-1 font-medium text-amber-600">
+              · {lockedPdfs.length} locked
+            </span>
+          )}{' '}
+          · {docs.length} filed · {patients.length} patient
           {patients.length === 1 ? '' : 's'}
           <span className="ml-3 font-mono text-slate-400 dark:text-slate-500">
             {sys
@@ -469,6 +480,14 @@ The file is not deleted — it moves to the Trash folder inside your vault, and 
           </div>
         ) : (
           <>
+            {lockedPdfs.length > 0 && (
+              <ul className="divide-y divide-amber-200 border-b border-amber-200 bg-amber-50/60 dark:divide-amber-900 dark:border-amber-900 dark:bg-amber-950/40">
+                {lockedPdfs.map((it) => (
+                  <LockedRow key={it.id} item={it} onUnlocked={refresh} />
+                ))}
+              </ul>
+            )}
+
             {pending.length > 1 && (
               <BulkBar
                 selectedCount={sel.ids.size}

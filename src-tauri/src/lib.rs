@@ -52,6 +52,18 @@ async fn import_files(
 
 /// The review queue as the database has it, so a half-finished import survives
 /// closing the app.
+/// Unlock a password-protected PDF that is waiting in the queue.
+#[tauri::command]
+fn unlock_pdf(
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+    ingest_id: String,
+    password: String,
+) -> Result<(), String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    ingest::unlock(&conn, &user.0, &ingest_id, &password)
+}
+
 #[tauri::command]
 fn list_staged(state: State<'_, Db>, user: State<'_, CurrentUser>) -> Result<Vec<IngestItem>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
@@ -522,6 +534,7 @@ pub fn run() {
             db_health,
             import_files,
             list_staged,
+            unlock_pdf,
             staged_thumb,
             list_patients,
             create_patient,

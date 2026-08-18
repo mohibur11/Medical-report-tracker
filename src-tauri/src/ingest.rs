@@ -30,6 +30,9 @@ pub enum IngestStatus {
     Extracted,
     /// Nothing readable — the normal outcome for handwritten prescriptions.
     NeedsDate,
+    /// A password-protected PDF. Staged and kept, but nothing can read it — not
+    /// the recognizer, not the exporter — until the password is supplied.
+    Locked,
     /// Byte-identical to something already in the vault.
     Duplicate,
     /// Unsupported or unreadable. Carries a message the user can act on.
@@ -43,6 +46,7 @@ impl IngestStatus {
         match s {
             "extracted" => IngestStatus::Extracted,
             "needs_date" => IngestStatus::NeedsDate,
+            "locked" => IngestStatus::Locked,
             "duplicate" => IngestStatus::Duplicate,
             "failed" => IngestStatus::Failed,
             _ => IngestStatus::Pending,
@@ -54,6 +58,7 @@ impl IngestStatus {
             IngestStatus::Pending => "pending",
             IngestStatus::Extracted => "extracted",
             IngestStatus::NeedsDate => "needs_date",
+            IngestStatus::Locked => "locked",
             IngestStatus::Duplicate => "duplicate",
             IngestStatus::Failed => "failed",
         }
@@ -97,7 +102,7 @@ pub fn list_staged(conn: &Connection, user_id: &str) -> Result<Vec<IngestItem>, 
               WHERE owner_user_id = ?1
                 AND document_id IS NULL
                 AND staged_path IS NOT NULL
-                AND status IN ('pending', 'extracted', 'needs_date')
+                AND status IN ('pending', 'extracted', 'needs_date', 'locked')
               -- Newest batch first, but drop order within a batch, which is the
               -- order the files were handed over in.
               ORDER BY created_at DESC, id ASC",
@@ -298,9 +303,29 @@ fn stage_one(
             return item;
         }
         // Ask pdfcpu how many pages there really are. Assuming one made a 12-page
-        // scanned report claim to be a single page everywhere it was shown.
+        // scanned report claim to be a single page everywhere it was shown. The
+        // same call says whether the file can be opened at all.
         if let Ok(exe) = crate::export::pdfcpu_path() {
-            item.page_count = Some(crate::export::page_count(&exe, &staged_path));
+            match crate::export::probe_pdf(&exe, &staged_path) {
+                crate::export::PdfState::Readable { pages } => item.page_count = Some(pages),
+                crate::export::PdfState::Locked => {
+                    // Kept, not rejected: the file is fine, it just needs a
+                    // password. Left in the queue with somewhere to type one.
+                    item.status = IngestStatus::Locked;
+                    item.error = Some(
+                        "This PDF is password protected. Enter the password to unlock it — \
+                         until then it cannot be read or included in an export."
+                            .into(),
+                    );
+                    let _ = persist(conn, user_id, &item, Some(&staged_path));
+                    return item;
+                }
+                // Not rejected: `info` is stricter than everything this app does
+                // with a PDF, and a file it complains about usually merges and
+                // exports without trouble. If it genuinely cannot be read, the
+                // export says so per file rather than the import refusing it here.
+                crate::export::PdfState::Questionable(_) => item.page_count = None,
+            }
         }
     }
 
@@ -309,6 +334,53 @@ fn stage_one(
     item.status = IngestStatus::NeedsDate;
     let _ = persist(conn, user_id, &item, Some(&staged_path));
     item
+}
+
+/// Unlock a staged PDF with the password the user supplied.
+///
+/// On success the staged file is replaced by a decrypted copy, so nothing
+/// downstream — recognition, export, the merged PDF — has to know it was ever
+/// locked. On failure nothing is touched.
+pub fn unlock(
+    conn: &Connection,
+    user_id: &str,
+    ingest_id: &str,
+    password: &str,
+) -> Result<(), String> {
+    if password.is_empty() {
+        return Err("Enter the password for this PDF.".into());
+    }
+
+    let staged: Option<String> = conn
+        .query_row(
+            "SELECT staged_path FROM ingest_items WHERE id = ?1 AND owner_user_id = ?2",
+            params![ingest_id, user_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| "No such file in the queue.".to_string())?;
+    let staged = PathBuf::from(staged.ok_or("That file is no longer staged.")?);
+
+    let exe = crate::export::pdfcpu_path()?;
+    crate::export::decrypt_pdf(&exe, &staged, password)?;
+
+    let pages = match crate::export::probe_pdf(&exe, &staged) {
+        crate::export::PdfState::Readable { pages } => pages,
+        crate::export::PdfState::Locked => {
+            return Err("The file is still locked — it may use a second password.".into())
+        }
+        crate::export::PdfState::Questionable(_) => 1,
+    };
+
+    conn.execute(
+        "UPDATE ingest_items
+         SET status = 'needs_date', error = NULL, page_count = ?2, ocr_text = NULL,
+             ocr_json = NULL, ocr_at = NULL, updated_at = datetime('now')
+         WHERE id = ?1",
+        params![ingest_id, pages],
+    )
+    .map_err(|e| format!("cannot update the queue: {e}"))?;
+
+    Ok(())
 }
 
 fn persist(
@@ -614,6 +686,171 @@ mod tests {
         assert_eq!(items[1].status, IngestStatus::Failed);
         assert_eq!(items[2].status, IngestStatus::NeedsDate);
         assert!(items[2].orientation_baked, "orientation 3 must still be baked");
+    }
+
+    /// A real password-protected PDF, made with the same tool that has to open it.
+    fn locked_pdf(dir: &Path, password: &str) -> String {
+        std::env::set_var(
+            "PDFCPU_PATH",
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("binaries")
+                .join("pdfcpu-x86_64-pc-windows-msvc.exe"),
+        );
+        let exe = crate::export::pdfcpu_path().unwrap();
+
+        let img = dir.join("page.png");
+        std::fs::copy(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("icons").join("128x128.png"),
+            &img,
+        )
+        .unwrap();
+
+        let plain = dir.join("plain.pdf");
+        std::process::Command::new(&exe)
+            .args(["import", "f:A4, pos:c", &plain.to_string_lossy(), &img.to_string_lossy()])
+            .output()
+            .unwrap();
+
+        let locked = dir.join("locked.pdf");
+        let out = std::process::Command::new(&exe)
+            .args([
+                "encrypt",
+                "--upw",
+                password,
+                "--opw",
+                password,
+                &plain.to_string_lossy(),
+                &locked.to_string_lossy(),
+            ])
+            .output()
+            .unwrap();
+        assert!(locked.exists(), "could not build a locked fixture: {out:?}");
+        locked.display().to_string()
+    }
+
+    #[test]
+    fn a_password_protected_pdf_is_kept_and_flagged_rather_than_rejected() {
+        let f = Fixture::new("locked");
+        let src = locked_pdf(&f.dir, "opensesame");
+
+        let items = f.stage(&[src]);
+        assert_eq!(items[0].status, IngestStatus::Locked);
+        assert!(
+            items[0].error.as_deref().unwrap_or_default().contains("password protected"),
+            "the message has to say what to do: {:?}",
+            items[0].error,
+        );
+
+        // Kept in the queue across a restart — a locked file the app forgets is a
+        // file silently missing from every future export.
+        let back = list_staged(&f.conn, &f.user).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].status, IngestStatus::Locked);
+    }
+
+    #[test]
+    fn the_right_password_unlocks_it_and_returns_it_to_the_queue() {
+        let f = Fixture::new("unlock");
+        let src = locked_pdf(&f.dir, "opensesame");
+        let items = f.stage(&[src]);
+
+        unlock(&f.conn, &f.user, &items[0].id, "opensesame").expect("should unlock");
+
+        let back = list_staged(&f.conn, &f.user).unwrap();
+        assert_eq!(back[0].status, IngestStatus::NeedsDate, "it becomes an ordinary row");
+        assert_eq!(back[0].error, None);
+        assert_eq!(back[0].page_count, Some(1), "and its real page count is known");
+
+        // Readable by everything downstream now, not just by the unlock path.
+        let exe = crate::export::pdfcpu_path().unwrap();
+        let staged: String = f
+            .conn
+            .query_row(
+                "SELECT staged_path FROM ingest_items WHERE id = ?1",
+                params![items[0].id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(matches!(
+            crate::export::probe_pdf(&exe, Path::new(&staged)),
+            crate::export::PdfState::Readable { .. }
+        ));
+    }
+
+    #[test]
+    fn a_wrong_password_says_so_and_leaves_the_file_alone() {
+        let f = Fixture::new("wrongpw");
+        let src = locked_pdf(&f.dir, "opensesame");
+        let items = f.stage(&[src]);
+        let staged: String = f
+            .conn
+            .query_row(
+                "SELECT staged_path FROM ingest_items WHERE id = ?1",
+                params![items[0].id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let before = std::fs::read(&staged).unwrap();
+
+        let err = unlock(&f.conn, &f.user, &items[0].id, "guess").unwrap_err();
+        assert!(err.contains("did not open"), "{err}");
+
+        assert_eq!(std::fs::read(&staged).unwrap(), before, "the file must be untouched");
+        let back = list_staged(&f.conn, &f.user).unwrap();
+        assert_eq!(back[0].status, IngestStatus::Locked, "and it stays locked");
+    }
+
+    #[test]
+    fn an_empty_password_is_refused_before_pdfcpu_is_asked() {
+        let f = Fixture::new("emptypw");
+        let src = locked_pdf(&f.dir, "opensesame");
+        let items = f.stage(&[src]);
+        assert!(unlock(&f.conn, &f.user, &items[0].id, "").unwrap_err().contains("Enter the password"));
+    }
+
+    #[test]
+    fn a_pdf_the_validator_dislikes_is_still_accepted() {
+        let f = Fixture::new("questionable");
+        // Correct magic bytes, nothing behind them. `pdfcpu info` refuses this,
+        // but refusing the import on that basis would also refuse real scans that
+        // merge perfectly well, so it is kept and the export decides.
+        let mut bytes = b"%PDF-1.4\n".to_vec();
+        bytes.extend(std::iter::repeat(0u8).take(600));
+        let src = f.write("broken.pdf", &bytes);
+
+        let items = f.stage(&[src]);
+        assert_eq!(
+            items[0].status,
+            IngestStatus::NeedsDate,
+            "a strict validator must not be the gate: {:?}",
+            items[0].error,
+        );
+        assert_eq!(items[0].page_count, None, "but no page count may be invented for it");
+    }
+
+    #[test]
+    fn structural_damage_is_pdfcpus_problem_and_it_handles_it() {
+        let f = Fixture::new("damaged");
+        let src = locked_pdf(&f.dir, "x");
+        // Build a plain one and break its cross-reference table, the classic
+        // symptom of a scanner interrupted mid-write. pdfcpu rebuilds it, which is
+        // why this app carries no separate repair tool.
+        let plain = f.dir.join("plain.pdf");
+        let mut bytes = std::fs::read(&plain).unwrap();
+        if let Some(at) = bytes.windows(9).position(|w| w == b"startxref") {
+            bytes.splice(at + 10..at + 14, b"99999".iter().copied());
+        }
+        let broken = f.write("broken-xref.pdf", &bytes);
+        let _ = src;
+
+        let items = f.stage(&[broken]);
+        assert_eq!(
+            items[0].status,
+            IngestStatus::NeedsDate,
+            "a rebuilt file is an ordinary file: {:?}",
+            items[0].error,
+        );
+        assert_eq!(items[0].error, None, "and it should not be flagged at the user");
     }
 
     #[test]

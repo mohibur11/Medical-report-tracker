@@ -20,7 +20,14 @@ export interface DbHealth {
   pendingJournalOps: number;
 }
 
-export type IngestStatus = 'pending' | 'extracted' | 'needs_date' | 'duplicate' | 'failed';
+export type IngestStatus =
+  | 'pending'
+  | 'extracted'
+  | 'needs_date'
+  /** A password-protected PDF: staged and kept, but unreadable until unlocked. */
+  | 'locked'
+  | 'duplicate'
+  | 'failed';
 
 export type FileKind = 'jpeg' | 'png' | 'pdf' | 'heic' | 'tiff' | 'webp' | 'unknown';
 
@@ -58,6 +65,16 @@ export const stagedThumb = (id: string): Promise<string | null> =>
  * pointing at them.
  */
 export const listStaged = (): Promise<IngestItem[]> => invoke('list_staged');
+
+/**
+ * Remove password protection from a staged PDF.
+ *
+ * pdfcpu repairs structural damage on its own, so a password is the one thing
+ * that genuinely stops a PDF being read. On success the staged file is replaced
+ * by an unlocked copy and nothing downstream needs to know it was ever locked.
+ */
+export const unlockPdf = (ingestId: string, password: string): Promise<void> =>
+  invoke('unlock_pdf', { ingestId, password });
 
 export interface Patient {
   id: string;
