@@ -79,6 +79,28 @@ export const listPatients = (): Promise<Patient[]> => invoke('list_patients');
 export const createPatient = (displayName: string, dob?: string): Promise<Patient> =>
   invoke('create_patient', { displayName, dob: dob || null });
 
+export interface RenameReport {
+  displayName: string;
+  folderSlug: string;
+  moved: number;
+  missing: number;
+  /** Files a lock kept in place, each with the reason. */
+  leftBehind: string[];
+}
+
+/**
+ * Rename a patient, or correct their date of birth.
+ *
+ * The name is in the folder and in every filename, so a rename moves every one of
+ * their documents. Partial success is possible — a file open in a viewer or held
+ * by a sync client cannot be moved — and is reported rather than hidden.
+ */
+export const renamePatient = (
+  patientId: string,
+  displayName: string,
+  dob: string | null,
+): Promise<RenameReport> => invoke('rename_patient', { patientId, displayName, dob });
+
 /** Move a staged file into the vault under its canonical name. */
 export interface OcrWord {
   text: string;

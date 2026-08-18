@@ -111,6 +111,31 @@ intact — nothing is stranded in staging.
 - **Back up now** — writes a database snapshot into the vault. Also happens
   automatically when you close the app.
 
+### 4b. Correcting a patient's name or date of birth
+
+`Library` → **Patients** → `Edit`.
+
+The date of birth is worth setting even though it is optional: it is what stops a
+birth date printed on a report being chosen as the report date, and it is what
+raises a warning when a document disagrees with it. A patient with none is marked
+`add one`.
+
+Renaming is the expensive one, and the screen says so before it acts. The name is
+the folder *and* part of every filename, so renaming a patient with 400 documents
+moves 400 files. Each move is journalled individually rather than the folder being
+renamed in one go — a folder rename fails entirely if any single file inside it is
+locked, and leaves nothing behind saying how far it got.
+
+Worth testing deliberately: **open one of the patient's PDFs in a viewer, then
+rename**. The locked file should be left where it is and named in the report, the
+rest should move, and renaming again after closing the viewer should finish the
+job. Nothing should be lost either way — a row that could not move keeps pointing
+at the file that still exists.
+
+Refused, with the reason: an empty name, a name made only of punctuation (it would
+silently become `Unknown-Patient`), a name that folds onto another patient's folder
+on Windows, and a date of birth later than a report already filed for that patient.
+
 ### 5. Export — the point of the whole thing
 
 Pick a patient, a year, a category, a quality preset, then **Create PDF**. Output
@@ -124,6 +149,33 @@ Open it and check:
 - records are in **date order**, with undated ones at the end
 - the **size** suits how you will send it — Email-safe stays under 25 MB and splits
   into parts at record boundaries if it cannot
+
+---
+
+## Keeping a copy in Google Drive
+
+The vault is deliberately plain: ordinary folders, ordinary files, nothing
+encrypted. Putting `Documents\MedicineReportTracker` in a synced Drive folder
+works, and what arrives on the other side is readable without this app —
+`2025-03-14_Rahim-Uddin_Thyroid-Profile.pdf` says what it is, and the
+`.meta.json` beside it carries the categories and notes the filename cannot.
+
+Four things to know before doing it:
+
+- **The live database must not go in there.** It sits in
+  `%LOCALAPPDATA%\com.mohibur.medicinereporttracker\` on purpose: a WAL sidecar
+  synced mid-write is a documented way to corrupt SQLite. The snapshot that
+  `Back up now` writes into the vault *is* safe to sync — it is a single
+  consistent file with no WAL.
+- **Sync clients hold file handles.** A rename or an edit that moves a file can
+  fail while Drive is uploading it. The app reports which files it could not move
+  and leaves them working where they are; repeating the action finishes the job.
+- **Renaming a patient re-uploads everything they own**, because every file
+  genuinely changes name. Rename before a big import, not after.
+- **Nothing is encrypted.** Anyone with access to that Drive folder can read every
+  report. That is the intended trade — it is what makes the archive readable
+  without the app — but it is worth being deliberate about who the folder is
+  shared with.
 
 ---
 

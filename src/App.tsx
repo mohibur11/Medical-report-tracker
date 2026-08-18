@@ -7,6 +7,7 @@ import { CategoryManager, CategoryPicker } from './components/CategoryPicker.tsx
 import { EditRow } from './components/EditRow.tsx';
 import { ExportPanel } from './components/ExportPanel.tsx';
 import { IDLE_LOCK_MS, LockScreen, LockSettings } from './components/Lock.tsx';
+import { PatientsPanel } from './components/PatientsPanel.tsx';
 import { ReviewRow, type RowHandle } from './components/ReviewRow.tsx';
 import { Thumb } from './components/Thumb.tsx';
 import { VaultTools } from './components/VaultTools.tsx';
@@ -368,6 +369,7 @@ export default function App() {
           <>
             <LockSettings state={lock} onChanged={refreshLock} />
             <VaultTools onRepaired={refresh} />
+            {patients.length > 0 && <PatientsPanel patients={patients} onChanged={refresh} />}
             <div className="border-b border-slate-200 px-6 py-3 dark:border-slate-800">
               <CategoryManager categories={categories} onChanged={refresh} />
             </div>

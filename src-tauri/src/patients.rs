@@ -66,6 +66,14 @@ pub fn create(
         }
     }
 
+    // Without this, a name made only of punctuation slugs to the fallback and the
+    // patient is silently created as "Unknown-Patient".
+    if !naming::is_nameable(name) {
+        return Err(format!(
+            "'{name}' has no characters Windows allows in a folder name. Use letters or digits."
+        ));
+    }
+
     let slug = naming::patient_slug(name);
 
     // NTFS is case-insensitive but case-preserving. Without this check 'Rahim' and

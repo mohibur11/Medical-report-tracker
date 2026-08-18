@@ -58,6 +58,31 @@ fn list_staged(state: State<'_, Db>, user: State<'_, CurrentUser>) -> Result<Vec
     ingest::list_staged(&conn, &user.0)
 }
 
+/// Rename a patient, or correct their date of birth.
+///
+/// Renaming moves every one of their files, so this is not the cheap operation
+/// its UI suggests; the report says exactly what moved and what did not.
+#[tauri::command]
+fn rename_patient(
+    app: AppHandle,
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+    patient_id: String,
+    display_name: String,
+    dob: Option<String>,
+) -> Result<vault::RenameReport, String> {
+    let vault_root = paths::vault_root(&app)?;
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    vault::rename_patient(
+        &conn,
+        &user.0,
+        &vault_root,
+        &patient_id,
+        &display_name,
+        dob.as_deref(),
+    )
+}
+
 #[tauri::command]
 fn list_patients(state: State<'_, Db>, user: State<'_, CurrentUser>) -> Result<Vec<patients::Patient>, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
@@ -500,6 +525,7 @@ pub fn run() {
             staged_thumb,
             list_patients,
             create_patient,
+            rename_patient,
             commit_item,
             list_documents,
             list_years,

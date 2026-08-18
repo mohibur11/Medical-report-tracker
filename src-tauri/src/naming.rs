@@ -110,6 +110,15 @@ pub fn patient_slug(display_name: &str) -> String {
     slugify(display_name, FOLDER_SLUG_MAX, "Unknown-Patient")
 }
 
+/// Would this name survive being turned into a folder?
+///
+/// `patient_slug` falls back to `Unknown-Patient` rather than returning nothing,
+/// which is right when adopting a stray file and wrong when a person is typing a
+/// name: it would silently file someone's records under "Unknown-Patient".
+pub fn is_nameable(display_name: &str) -> bool {
+    !slugify(display_name, FOLDER_SLUG_MAX, "").is_empty()
+}
+
 pub fn title_slug(title: &str) -> String {
     slugify(title, TITLE_SLUG_MAX, "Untitled")
 }

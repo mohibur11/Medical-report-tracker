@@ -509,6 +509,242 @@ pub fn update(
     })
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameReport {
+    pub display_name: String,
+    pub folder_slug: String,
+    /// Files that changed place on disk.
+    pub moved: usize,
+    /// Rows updated whose file was already missing — the reconciler's problem,
+    /// not this one's.
+    pub missing: usize,
+    /// Files that could not be moved, each with the reason. A locked file is the
+    /// normal case here: a PDF left open in a viewer, or a sync client holding a
+    /// handle while it uploads.
+    pub left_behind: Vec<String>,
+}
+
+/// Rename a patient, moving every one of their documents to match.
+///
+/// The patient's name is in three places at once — the folder, every filename,
+/// and the database — so this is a bulk file operation, not a text edit. Each
+/// document is journalled and moved individually rather than the folder being
+/// renamed wholesale, because a folder rename fails entirely if any single file
+/// inside it is locked, and leaves nothing behind to say how far it got.
+///
+/// Partial success is a real outcome and is reported rather than hidden: rows
+/// that moved are updated, rows that did not keep pointing at the file that still
+/// exists, and running the rename again picks up the stragglers.
+pub fn rename_patient(
+    conn: &Connection,
+    user_id: &str,
+    vault_root: &Path,
+    patient_id: &str,
+    new_name: &str,
+    new_dob: Option<&str>,
+) -> Result<RenameReport, String> {
+    let (old_name, old_slug): (String, String) = conn
+        .query_row(
+            "SELECT display_name, folder_slug FROM patients
+             WHERE id = ?1 AND owner_user_id = ?2 AND archived_at IS NULL",
+            params![patient_id, user_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| "No such patient.".to_string())?;
+
+    let name = new_name.trim();
+    if name.is_empty() {
+        return Err("A patient needs a name.".into());
+    }
+
+    let dob = new_dob.map(str::trim).filter(|d| !d.is_empty());
+    if let Some(d) = dob {
+        if !naming::is_valid_doc_date(d) {
+            return Err(format!("'{d}' is not a valid date of birth."));
+        }
+    }
+
+    if !naming::is_nameable(name) {
+        return Err(format!(
+            "'{name}' has no characters Windows allows in a folder name. Use letters or digits."
+        ));
+    }
+    let new_slug = naming::patient_slug(name);
+
+    // Same rule as creating a patient: NTFS is case-insensitive, so two names that
+    // differ only by case or punctuation would share one folder and interleave.
+    let taken: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM patients
+             WHERE owner_user_id = ?1 AND upper(folder_slug) = upper(?2)
+               AND id <> ?3 AND archived_at IS NULL",
+            params![user_id, new_slug, patient_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if taken > 0 {
+        return Err(format!(
+            "Another patient already uses the folder '{new_slug}'. Names that differ only by \
+             capitalisation or punctuation share one folder on Windows."
+        ));
+    }
+
+    // A date of birth that is later than a document already filed for this patient
+    // would make the library self-contradictory the moment it is saved.
+    if let Some(d) = dob {
+        let earliest: Option<String> = conn
+            .query_row(
+                "SELECT min(doc_date) FROM documents
+                 WHERE patient_id = ?1 AND trashed_at IS NULL AND doc_date NOT LIKE '0000%'",
+                params![patient_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(None);
+        if let Some(earliest) = earliest.filter(|e| e.as_str() < d) {
+            return Err(format!(
+                "{name} already has a report dated {}, which is before this date of birth ({}). \
+                 Correct one of the two.",
+                display_dmy(&earliest),
+                display_dmy(d)
+            ));
+        }
+    }
+
+    // Renamed in the database first, then on disk. The sidecars written during
+    // the move read the patient's name from this row, and they are what someone
+    // reading the vault without the app has to go on — a sidecar carrying the old
+    // name beside a file carrying the new one is worse than either alone.
+    conn.execute(
+        "UPDATE patients SET display_name = ?2, folder_slug = ?3, dob = ?4,
+                             updated_at = datetime('now')
+         WHERE id = ?1",
+        params![patient_id, name, new_slug, dob],
+    )
+    .map_err(|e| format!("cannot rename patient: {e}"))?;
+
+    let root_len = vault_root.display().to_string().encode_utf16().count() + 1;
+    let mut report = RenameReport {
+        display_name: name.to_string(),
+        folder_slug: new_slug.clone(),
+        moved: 0,
+        missing: 0,
+        left_behind: Vec::new(),
+    };
+
+    let docs: Vec<(String, String, String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, rel_path, doc_date, title FROM documents
+                 WHERE patient_id = ?1 AND owner_user_id = ?2 AND trashed_at IS NULL
+                 ORDER BY rel_path",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![patient_id, user_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+    };
+
+    for (doc_id, old_rel, doc_date, title) in docs {
+        let old_path = vault_root.join(old_rel.replace('\\', "/"));
+        let old_file = old_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let ext = old_path
+            .extension()
+            .map(|e| e.to_string_lossy().to_string())
+            .unwrap_or_else(|| "bin".into());
+
+        // Keep the collision suffix the file already has when the slot it would
+        // land in is free. Renaming a patient and back again should not stamp
+        // `__02` onto every file, and suffixes are never reused.
+        let existing_seq = naming::parse_file_name(&old_file).map(|p| p.seq).unwrap_or(1);
+        let candidate = naming::build_name(&doc_date, name, &title, &ext, existing_seq, root_len);
+        let claimed: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM documents
+                 WHERE rel_path = ?1 AND id <> ?2 AND trashed_at IS NULL",
+                params![candidate.rel_path, doc_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(1);
+        let candidate_free =
+            claimed == 0 && !vault_root.join(candidate.rel_path.replace('\\', "/")).exists();
+
+        let built = if candidate_free || candidate.rel_path == old_rel {
+            candidate
+        } else {
+            let probe = naming::build_name(&doc_date, name, &title, &ext, 1, root_len);
+            let dir_rel = format!("{}\\{}", probe.patient_folder, probe.year_folder);
+            let base = probe
+                .file_name
+                .rsplit_once('.')
+                .map(|(stem, _)| stem.to_string())
+                .unwrap_or_else(|| probe.file_name.clone());
+            let seq = reserve_seq(conn, &dir_rel, &base)?;
+            naming::build_name(&doc_date, name, &title, &ext, seq, root_len)
+        };
+
+        if built.rel_path == old_rel {
+            continue;
+        }
+        let new_path = vault_root.join(built.rel_path.replace('\\', "/"));
+
+        if old_path.exists() {
+            let journal_id = journal_intent(conn, "move", &old_path, &new_path)?;
+            match move_file(&old_path, &new_path) {
+                Ok(()) => {
+                    journal_done(conn, &journal_id)?;
+                    report.moved += 1;
+                }
+                Err(e) => {
+                    // One locked file must not abandon the other four hundred. The
+                    // row keeps pointing at the file that still exists, so nothing
+                    // is lost, and running the rename again retries it.
+                    mark_failed(conn, &journal_id, &e)?;
+                    report.left_behind.push(format!("{old_file} - {e}"));
+                    continue;
+                }
+            }
+        } else {
+            // Already gone from disk. Move the row anyway so it lines up with the
+            // new name; the reconciler is what finds the file again.
+            report.missing += 1;
+        }
+
+        crate::backup::remove_sidecar(vault_root, &old_rel);
+        conn.execute(
+            "UPDATE documents SET rel_path = ?2, updated_at = datetime('now') WHERE id = ?1",
+            params![doc_id, built.rel_path],
+        )
+        .map_err(|e| format!("cannot update document path: {e}"))?;
+        let _ = crate::backup::write_sidecar(conn, vault_root, &doc_id);
+    }
+
+    // Tidy up what the moves emptied. Only ever removes directories that are
+    // already empty, so anything the user put there themselves survives.
+    if new_slug != old_slug {
+        prune_empty_dirs(&vault_root.join(&old_slug));
+    }
+
+    Ok(report)
+}
+
+/// Remove `dir` and its subdirectories if, and only if, they contain nothing.
+fn prune_empty_dirs(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        if entry.path().is_dir() {
+            prune_empty_dirs(&entry.path());
+        }
+    }
+    let _ = std::fs::remove_dir(dir);
+}
+
 /// Move a document to the vault's Trash folder and mark the row trashed.
 ///
 /// Nothing is ever unlinked. A medical record deleted by a mis-click is not
@@ -619,6 +855,227 @@ mod tests {
                 },
             )
         }
+    }
+
+    impl Fx {
+        fn rename(&self, name: &str, dob: Option<&str>) -> Result<RenameReport, String> {
+            rename_patient(&self.conn, &self.user, &self.vault(), &self.patient, name, dob)
+        }
+
+        fn rel_path(&self, doc_id: &str) -> String {
+            self.conn
+                .query_row(
+                    "SELECT rel_path FROM documents WHERE id = ?1",
+                    params![doc_id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        }
+
+        fn exists(&self, rel: &str) -> bool {
+            self.vault().join(rel.replace('\\', "/")).exists()
+        }
+    }
+
+    #[test]
+    fn renaming_a_patient_moves_every_file_they_own() {
+        let f = Fx::new("rename");
+        let a = f.commit(&f.stage("jpg", b"one"), "2025-03-14", "Thyroid Profile").unwrap();
+        let b = f.commit(&f.stage("pdf", b"two"), "2024-11-02", "Lipid Profile").unwrap();
+        assert!(f.exists(&a.rel_path) && f.exists(&b.rel_path));
+
+        let report = f.rename("Rahim Uddin Ahmed", None).unwrap();
+        assert_eq!(report.moved, 2);
+        assert_eq!(report.folder_slug, "Rahim-Uddin-Ahmed");
+        assert!(report.left_behind.is_empty());
+
+        // The name is in the folder AND in every filename.
+        for id in [&a.id, &b.id] {
+            let rel = f.rel_path(id);
+            assert!(rel.starts_with("Rahim-Uddin-Ahmed\\"), "folder should change: {rel}");
+            assert!(rel.contains("_Rahim-Uddin-Ahmed_"), "filename should change: {rel}");
+            assert!(f.exists(&rel), "the file must be where the row says: {rel}");
+        }
+
+        assert!(!f.exists(&a.rel_path), "nothing may be left at the old path");
+        assert!(
+            !f.vault().join("Rahim-Uddin").exists(),
+            "the emptied folder should not linger",
+        );
+    }
+
+    #[test]
+    fn the_bytes_survive_the_move() {
+        let f = Fx::new("bytes");
+        let doc = f.commit(&f.stage("jpg", b"exact contents"), "2025-03-14", "CBC").unwrap();
+        f.rename("Karim Uddin", None).unwrap();
+        let moved = f.vault().join(f.rel_path(&doc.id).replace('\\', "/"));
+        assert_eq!(std::fs::read(moved).unwrap(), b"exact contents");
+    }
+
+    #[test]
+    fn a_name_another_patient_already_folds_onto_is_refused() {
+        let f = Fx::new("clash");
+        f.conn
+            .execute(
+                "INSERT INTO patients (id, owner_user_id, display_name, folder_slug, created_at, updated_at)
+                 VALUES ('other', ?1, 'Karim Uddin', 'Karim-Uddin', datetime('now'), datetime('now'))",
+                params![f.user],
+            )
+            .unwrap();
+        let doc = f.commit(&f.stage("jpg", b"x"), "2025-03-14", "CBC").unwrap();
+        let before = f.rel_path(&doc.id);
+
+        // Differs only by case and punctuation, so Windows would merge the folders.
+        let err = f.rename("karim/uddin", None).unwrap_err();
+        assert!(err.contains("already uses the folder"), "{err}");
+
+        assert_eq!(f.rel_path(&doc.id), before, "a refused rename moves nothing");
+        assert!(f.exists(&before));
+    }
+
+    #[test]
+    fn an_empty_name_is_refused() {
+        let f = Fx::new("emptyname");
+        assert!(f.rename("   ", None).unwrap_err().contains("needs a name"));
+    }
+
+    #[test]
+    fn a_name_windows_cannot_spell_is_refused_rather_than_silently_emptied() {
+        let f = Fx::new("unspellable");
+        let err = f.rename("///", None).unwrap_err();
+        assert!(err.contains("no characters Windows allows"), "{err}");
+    }
+
+    #[test]
+    fn correcting_the_date_of_birth_moves_nothing() {
+        let f = Fx::new("dob");
+        let doc = f.commit(&f.stage("jpg", b"x"), "2025-03-14", "CBC").unwrap();
+        let before = f.rel_path(&doc.id);
+
+        let report = f.rename("Rahim Uddin", Some("1978-03-12")).unwrap();
+        assert_eq!(report.moved, 0, "the name did not change, so no file should");
+        assert_eq!(f.rel_path(&doc.id), before);
+
+        let dob: Option<String> = f
+            .conn
+            .query_row("SELECT dob FROM patients WHERE id = ?1", params![f.patient], |r| r.get(0))
+            .unwrap();
+        assert_eq!(dob.as_deref(), Some("1978-03-12"));
+    }
+
+    #[test]
+    fn a_date_of_birth_after_an_existing_report_is_refused() {
+        let f = Fx::new("dobclash");
+        f.commit(&f.stage("jpg", b"x"), "2020-05-06", "CBC").unwrap();
+        // Saving this would make the library contradict itself: a report filed
+        // before the patient was born.
+        let err = f.rename("Rahim Uddin", Some("2021-01-01")).unwrap_err();
+        assert!(err.contains("before this date of birth"), "{err}");
+        assert!(err.contains("06/05/2020"), "it should name the report that disagrees: {err}");
+    }
+
+    #[test]
+    fn an_invalid_date_of_birth_is_refused() {
+        let f = Fx::new("dobbad");
+        assert!(f.rename("Rahim Uddin", Some("12/03/1978")).unwrap_err().contains("not a valid"));
+    }
+
+    #[test]
+    fn renaming_back_does_not_stamp_a_suffix_onto_every_file() {
+        let f = Fx::new("roundtrip");
+        let doc = f.commit(&f.stage("jpg", b"x"), "2025-03-14", "CBC").unwrap();
+        let original = f.rel_path(&doc.id);
+
+        f.rename("Karim Uddin", None).unwrap();
+        f.rename("Rahim Uddin", None).unwrap();
+
+        assert_eq!(
+            f.rel_path(&doc.id),
+            original,
+            "a round trip should land back on the same name, not CBC__02",
+        );
+        assert!(f.exists(&original));
+    }
+
+    #[test]
+    fn a_file_already_gone_from_disk_still_gets_its_row_moved() {
+        let f = Fx::new("missing");
+        let doc = f.commit(&f.stage("jpg", b"x"), "2025-03-14", "CBC").unwrap();
+        std::fs::remove_file(f.vault().join(doc.rel_path.replace('\\', "/"))).unwrap();
+
+        let report = f.rename("Karim Uddin", None).unwrap();
+        assert_eq!(report.moved, 0);
+        assert_eq!(report.missing, 1, "reported, not silently counted as moved");
+        assert!(
+            f.rel_path(&doc.id).contains("Karim-Uddin"),
+            "the row should still line up with the new name",
+        );
+    }
+
+    #[test]
+    fn a_rename_leaves_the_journal_clean() {
+        let f = Fx::new("journal");
+        f.commit(&f.stage("jpg", b"one"), "2025-03-14", "CBC").unwrap();
+        f.commit(&f.stage("pdf", b"two"), "2025-04-01", "ESR").unwrap();
+        f.rename("Karim Uddin", None).unwrap();
+
+        let pending: i64 = f
+            .conn
+            .query_row(
+                "SELECT count(*) FROM fs_journal WHERE applied_at IS NULL AND failed_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, 0, "every move must be closed out");
+        assert_eq!(replay_journal(&f.conn).unwrap(), 0, "nothing left to replay");
+    }
+
+    #[test]
+    fn sidecars_follow_the_files() {
+        let f = Fx::new("sidecar");
+        let doc = f.commit(&f.stage("jpg", b"x"), "2025-03-14", "CBC").unwrap();
+        crate::backup::write_sidecar(&f.conn, &f.vault(), &doc.id).unwrap();
+        let old_sidecar = f.vault().join(format!("{}{}", doc.rel_path.replace('\\', "/"), crate::backup::SIDECAR_SUFFIX));
+        assert!(old_sidecar.exists());
+
+        f.rename("Karim Uddin", None).unwrap();
+
+        assert!(!old_sidecar.exists(), "the old sidecar would describe a file that moved");
+        let new_sidecar = f
+            .vault()
+            .join(format!("{}{}", f.rel_path(&doc.id).replace('\\', "/"), crate::backup::SIDECAR_SUFFIX));
+        assert!(new_sidecar.exists(), "and a new one should sit beside the moved file");
+        let json = std::fs::read_to_string(new_sidecar).unwrap();
+        assert!(json.contains("Karim Uddin"), "the sidecar should carry the new name");
+    }
+
+    #[test]
+    fn a_folder_holding_anything_else_is_left_alone() {
+        let f = Fx::new("keepdir");
+        f.commit(&f.stage("jpg", b"x"), "2025-03-14", "CBC").unwrap();
+        // Something the user put there themselves.
+        let stray = f.vault().join("Rahim-Uddin").join("notes.txt");
+        std::fs::write(&stray, b"my own notes").unwrap();
+
+        f.rename("Karim Uddin", None).unwrap();
+
+        assert!(stray.exists(), "pruning empty folders must never take a file with it");
+    }
+
+    #[test]
+    fn trashed_documents_are_not_dragged_back_out() {
+        let f = Fx::new("trashed");
+        let doc = f.commit(&f.stage("jpg", b"x"), "2025-03-14", "CBC").unwrap();
+        trash(&f.conn, &f.user, &f.vault(), &doc.id).unwrap();
+
+        let report = f.rename("Karim Uddin", None).unwrap();
+        assert_eq!(report.moved, 0);
+        assert!(
+            f.vault().join("Trash").join(doc.rel_path.replace('\\', "/")).exists(),
+            "a trashed file stays in Trash under the name it was trashed with",
+        );
     }
 
     impl Drop for Fx {
