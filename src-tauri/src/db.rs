@@ -19,6 +19,7 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (3, include_str!("../../db/migrations/003_ingest_ocr.sql")),
     (4, include_str!("../../db/migrations/004_export_presets.sql")),
     (5, include_str!("../../db/migrations/005_settings.sql")),
+    (6, include_str!("../../db/migrations/006_drive.sql")),
 ];
 
 pub struct Db(pub Mutex<Connection>);

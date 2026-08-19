@@ -189,11 +189,29 @@ on Windows, and a date of birth later than a report already filed for that patie
 
 `Library` → **Google Drive**.
 
-This uses the folder Google Drive for desktop already mounts — on this machine
-`G:\My Drive` — rather than signing in to Google from the app. Nothing to
-authorise, no token stored next to a deliberately unencrypted database, and no
-weekly re-authorisation. If Drive is not running, the panel says so instead of
-failing at the moment you press the button.
+Two ways in, and the panel says which one it is using.
+
+**Signing in to a Google account** uploads over the Drive API and works on any
+machine, with or without Drive for desktop. It needs a one-time setup, because
+Google issues OAuth credentials per application and this one is published as
+source — a client ID committed here would be spent by strangers against the quota
+and would put someone else's name on the consent screen. Press **Set up Google
+Drive** and the panel walks through it: create a project, enable the Drive API,
+create an **OAuth client ID of type Desktop app**, publish the consent screen,
+paste the ID and secret.
+
+Publishing the consent screen matters. Left in **Testing**, Google revokes the
+sign-in every seven days and you re-authorise weekly forever.
+
+Then **Choose a Google account** opens your browser. Pick the account, allow, and
+the tab says you can close it. The app asks only for `drive.file` — it can reach
+the files it creates and nothing else in your Drive, not even files you put there
+yourself. The sign-in is stored encrypted to your Windows account, so a copied
+database gives nobody access to your Drive.
+
+**Without an account** it falls back to the folder Drive for desktop mounts — on
+this machine `G:\My Drive` — which needs no credentials at all. If neither is
+available the panel says so rather than failing when you press the button.
 
 **Sync with Google Drive** refreshes the sidecars and the database snapshot, then
 copies the vault to `MedicineReportTracker` inside that folder. Files that are

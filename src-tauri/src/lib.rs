@@ -3,7 +3,9 @@ mod backup;
 mod categories;
 mod db;
 mod documents;
+mod drive;
 mod export;
+mod google;
 mod imaging;
 mod ingest;
 mod naming;
@@ -13,6 +15,7 @@ mod paths;
 mod presets;
 mod reconcile;
 mod search;
+mod secret;
 mod sniff;
 mod sync;
 mod vault;
@@ -355,6 +358,10 @@ const LAST_SYNC: &str = "drive_last_sync";
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DriveStatus {
+    /// The signed-in Google account, when the API is being used.
+    account: google::Account,
+    /// Which of the two ways a backup would currently be written.
+    method: &'static str,
     /// The chosen folder, if one has been chosen or found.
     folder: Option<String>,
     /// Where the copy is written inside it.
@@ -384,12 +391,37 @@ fn drive_status(state: State<'_, Db>) -> Result<DriveStatus, String> {
         .map(|p| p.display().to_string())
         .collect();
 
-    let target = drive_target(&conn);
+    let account = google::account(&conn);
+    let folder = drive_target(&conn);
+
+    // The API wins when an account is connected: it works whether or not Drive
+    // for desktop is installed, and it is what the user asked to sign in to.
+    let (method, backup_path, available, has_backup) = if account.connected {
+        let api = drive::DriveApiTarget::new(&conn);
+        (
+            "api",
+            Some(api.describe()),
+            true,
+            // Only a real listing could answer this, which costs a round trip on
+            // every status refresh. Restore checks for itself and says so.
+            true,
+        )
+    } else {
+        (
+            "folder",
+            folder.as_ref().map(|t| BackupTarget::describe(t)),
+            folder.as_ref().map(|t| t.available()).unwrap_or(false),
+            folder.as_ref().and_then(|t| t.snapshot()).is_some(),
+        )
+    };
+
     Ok(DriveStatus {
+        account,
+        method,
         folder: chosen.or_else(|| suggestions.first().cloned()),
-        backup_path: target.as_ref().map(|t| BackupTarget::describe(t)),
-        available: target.as_ref().map(|t| t.available()).unwrap_or(false),
-        has_backup: target.as_ref().and_then(|t| t.snapshot()).is_some(),
+        backup_path,
+        available,
+        has_backup,
         suggestions,
         last_sync: db::setting(&conn, LAST_SYNC),
     })
@@ -405,6 +437,50 @@ fn set_drive_folder(state: State<'_, Db>, folder: String) -> Result<(), String> 
     db::set_setting(&conn, DRIVE_FOLDER, &folder)
 }
 
+/// Store the OAuth client this installation should sign in with.
+///
+/// Asked of the user rather than shipped in the binary: this repository is
+/// public, and a client ID committed to it would be used by strangers against
+/// the quota — and, worse, would show their app's name on the consent screen.
+#[tauri::command]
+fn set_google_client(
+    state: State<'_, Db>,
+    client_id: String,
+    client_secret: String,
+) -> Result<google::Account, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    google::set_client(&conn, &client_id, &client_secret)?;
+    Ok(google::account(&conn))
+}
+
+/// Sign in to Google. Opens the browser and waits for the answer.
+#[tauri::command]
+async fn connect_google(state: State<'_, Db>) -> Result<google::Account, String> {
+    // The database lock is taken twice, briefly, and never while the browser is
+    // open: signing in takes as long as the person takes, and holding it would
+    // freeze every other part of the app until they finished.
+    let (client_id, client_secret) = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        google::client_credentials(&conn)?
+    };
+
+    let tokens = tauri::async_runtime::spawn_blocking(move || {
+        google::run_flow(&client_id, &client_secret)
+    })
+    .await
+    .map_err(|e| format!("the sign-in did not finish: {e}"))??;
+
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    google::store(&conn, tokens)
+}
+
+#[tauri::command]
+fn disconnect_google(state: State<'_, Db>) -> Result<google::Account, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    google::disconnect(&conn)?;
+    Ok(google::account(&conn))
+}
+
 /// Write the current state of the vault into the Drive folder.
 ///
 /// The database snapshot is refreshed first, so what lands in Drive is the
@@ -418,14 +494,22 @@ fn backup_to_drive(
     let vault_root = paths::vault_root(&app)?;
     let conn = state.0.lock().map_err(|e| e.to_string())?;
 
-    let target = drive_target(&conn).ok_or(
-        "No Google Drive folder found. Choose the folder Drive syncs, then try again.",
-    )?;
-
+    // What travels must be current, so the sidecars and the snapshot are
+    // rewritten before anything is copied.
     backup::write_all_sidecars(&conn, &vault_root, &user.0)?;
     backup::snapshot(&conn, &vault_root)?;
 
-    let report = target.push(&vault_root)?;
+    let report = if google::account(&conn).connected {
+        drive::DriveApiTarget::new(&conn).push(&vault_root)?
+    } else {
+        drive_target(&conn)
+            .ok_or(
+                "Not connected to Google Drive, and no synced folder was found. \
+                 Connect a Google account, or choose the folder Drive syncs.",
+            )?
+            .push(&vault_root)?
+    };
+
     db::set_setting(&conn, LAST_SYNC, &chrono_now(&conn))?;
     Ok(report)
 }
@@ -438,8 +522,12 @@ fn restore_from_drive(
 ) -> Result<sync::SyncReport, String> {
     let vault_root = paths::vault_root(&app)?;
     let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let target = drive_target(&conn).ok_or("No Google Drive folder is set.")?;
-    target.pull(&vault_root)
+    if google::account(&conn).connected {
+        return drive::DriveApiTarget::new(&conn).pull(&vault_root);
+    }
+    drive_target(&conn)
+        .ok_or("No Google Drive folder is set, and no Google account is connected.")?
+        .pull(&vault_root)
 }
 
 /// SQLite owns the clock here, so the timestamp matches every other one stored.
@@ -837,6 +925,9 @@ pub fn run() {
             update_document,
             backup_now,
             drive_status,
+            set_google_client,
+            connect_google,
+            disconnect_google,
             set_drive_folder,
             backup_to_drive,
             restore_from_drive,

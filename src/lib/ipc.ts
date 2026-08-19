@@ -215,7 +215,17 @@ export const updateDocument = (args: {
 export const trashDocument = (documentId: string): Promise<void> =>
   invoke('trash_document', { documentId });
 
+export interface GoogleAccount {
+  email: string | null;
+  connected: boolean;
+  /** False until an OAuth client ID has been configured. */
+  configured: boolean;
+}
+
 export interface DriveStatus {
+  account: GoogleAccount;
+  /** 'api' once an account is connected, otherwise the synced folder. */
+  method: 'api' | 'folder';
   folder: string | null;
   backupPath: string | null;
   /** False when Drive for desktop is stopped or signed out. */
@@ -234,6 +244,23 @@ export interface SyncReport {
 }
 
 export const driveStatus = (): Promise<DriveStatus> => invoke('drive_status');
+
+/**
+ * Store the OAuth client this installation signs in with.
+ *
+ * Asked of the user rather than shipped in the binary: this repository is public,
+ * and a client ID committed to it would be spent by strangers against the quota
+ * and would put someone else's app name on the consent screen.
+ */
+export const setGoogleClient = (
+  clientId: string,
+  clientSecret: string,
+): Promise<GoogleAccount> => invoke('set_google_client', { clientId, clientSecret });
+
+/** Opens the browser and waits — up to three minutes — for the account choice. */
+export const connectGoogle = (): Promise<GoogleAccount> => invoke('connect_google');
+
+export const disconnectGoogle = (): Promise<GoogleAccount> => invoke('disconnect_google');
 
 export const setDriveFolder = (folder: string): Promise<void> =>
   invoke('set_drive_folder', { folder });

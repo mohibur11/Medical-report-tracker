@@ -46,6 +46,15 @@ password-hash = { version = "0.5", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["std"] }
 base64 = "0.22"
 
+# Google Drive over HTTPS. rustls rather than the platform TLS stack so the build
+# does not depend on OpenSSL being present, and blocking because every Drive call
+# happens inside a command that is already off the UI thread.
+reqwest = { version = "0.12", default-features = false, features = [
+  "blocking",
+  "json",
+  "rustls-tls",
+] }
+
 # Filenames must be NFC-normalized (NTFS compares ordinally and does no
 # normalization of its own) and truncated on grapheme boundaries, so a cut never
 # severs a combining mark.
@@ -68,6 +77,9 @@ features = [
   "Media_Ocr",
   "Storage",
   "Storage_Streams",
+  # DPAPI, to keep the Google refresh token out of a plaintext database.
+  "Win32_Security_Cryptography",
+  "Win32_Foundation",
 ]
 
 [profile.release]

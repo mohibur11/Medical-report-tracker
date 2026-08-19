@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 
+import { GoogleAccountBar } from './GoogleAccountBar.tsx';
+
 import {
   backupToDrive,
   driveStatus,
@@ -14,11 +16,13 @@ import {
  * A second copy of the vault, in Google Drive.
  *
  * The most likely way to lose a decade of records is one dead disk, so this is
- * the panel that matters most and the one least likely to be visited. It uses the
- * folder Drive for desktop already mounts rather than signing in to Google:
- * nothing to authorise, no token stored beside a deliberately unencrypted
- * database, and what arrives in Drive is the vault itself — ordinary folders and
- * files, readable in a browser without this app.
+ * the panel that matters most and the one least likely to be visited.
+ *
+ * Two ways to get there. Signing in to a Google account uploads over the API and
+ * works on any machine. Failing that — no account connected — it falls back to
+ * copying into the folder Google Drive for desktop already mounts, which needs
+ * no credentials at all. Either way what lands in Drive is the vault itself:
+ * ordinary folders and files, readable in a browser without this app.
  */
 export function DrivePanel({ onRestored }: { onRestored: () => void }) {
   const [status, setStatus] = useState<DriveStatus | null>(null);
@@ -71,6 +75,8 @@ export function DrivePanel({ onRestored }: { onRestored: () => void }) {
         Google Drive
       </h2>
 
+      {status && <GoogleAccountBar status={status} onChanged={() => void refresh()} />}
+
       <div className="mt-1.5 flex flex-wrap items-center gap-2">
         <button
           type="button"
@@ -101,13 +107,15 @@ export function DrivePanel({ onRestored }: { onRestored: () => void }) {
           {busy === 'restore' ? 'Restoring…' : 'Restore from Drive'}
         </button>
 
-        <button
-          type="button"
-          onClick={() => void choose()}
-          className="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800"
-        >
-          Change folder…
-        </button>
+        {status?.method === 'folder' && (
+          <button
+            type="button"
+            onClick={() => void choose()}
+            className="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-50 dark:border-slate-600 dark:hover:bg-slate-800"
+          >
+            Change folder…
+          </button>
+        )}
 
         {status?.lastSync && (
           <span className="text-xs text-slate-500 dark:text-slate-400">
@@ -117,13 +125,14 @@ export function DrivePanel({ onRestored }: { onRestored: () => void }) {
       </div>
 
       <p className="selectable mt-1 font-mono text-[11px] text-slate-500 dark:text-slate-400">
-        {status?.backupPath ?? 'No Drive folder found — choose the one Drive syncs.'}
+        {status?.backupPath ??
+          'Connect a Google account, or choose the folder Drive for desktop syncs.'}
       </p>
 
-      {status && !status.available && status.folder && (
+      {status?.method === 'folder' && !status.available && status.folder && (
         <p className="mt-1 text-xs text-amber-600">
           That folder is not there right now. Google Drive for desktop may be signed out or
-          stopped.
+          stopped — or connect a Google account instead, which does not need it.
         </p>
       )}
 
