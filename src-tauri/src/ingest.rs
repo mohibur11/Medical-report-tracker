@@ -103,9 +103,10 @@ pub fn list_staged(conn: &Connection, user_id: &str) -> Result<Vec<IngestItem>, 
                 AND document_id IS NULL
                 AND staged_path IS NOT NULL
                 AND status IN ('pending', 'extracted', 'needs_date', 'locked')
-              -- Newest batch first, but drop order within a batch, which is the
-              -- order the files were handed over in.
-              ORDER BY created_at DESC, id ASC",
+              -- Newest batch first, drop order within it. Ordered by the ULIDs
+              -- rather than by created_at, which has one-second resolution: a
+              -- batch whose files straddle a second boundary came back reversed.
+              ORDER BY batch_id DESC, id ASC",
         )
         .map_err(|e| e.to_string())?;
 
@@ -532,7 +533,7 @@ mod tests {
         assert_eq!(
             back.iter().map(|i| i.file_name.as_str()).collect::<Vec<_>>(),
             vec!["one.jpg", "two.jpg"],
-            "drop order within a batch is preserved",
+            "drop order within a batch is preserved, even across a second boundary",
         );
 
         // Derived from the stored EXIF tag rather than remembered, so the note

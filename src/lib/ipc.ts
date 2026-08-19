@@ -215,6 +215,40 @@ export const updateDocument = (args: {
 export const trashDocument = (documentId: string): Promise<void> =>
   invoke('trash_document', { documentId });
 
+export interface DriveStatus {
+  folder: string | null;
+  backupPath: string | null;
+  /** False when Drive for desktop is stopped or signed out. */
+  available: boolean;
+  suggestions: string[];
+  lastSync: string | null;
+  hasBackup: boolean;
+}
+
+export interface SyncReport {
+  location: string;
+  copied: number;
+  unchanged: number;
+  bytes: number;
+  failed: string[];
+}
+
+export const driveStatus = (): Promise<DriveStatus> => invoke('drive_status');
+
+export const setDriveFolder = (folder: string): Promise<void> =>
+  invoke('set_drive_folder', { folder });
+
+/**
+ * Write the vault as it is now into the Drive folder.
+ *
+ * Refreshes the sidecars and the database snapshot first, so what lands in Drive
+ * is the library as it stands rather than as it was at the last close.
+ */
+export const backupToDrive = (): Promise<SyncReport> => invoke('backup_to_drive');
+
+/** Copy back anything missing or different locally. */
+export const restoreFromDrive = (): Promise<SyncReport> => invoke('restore_from_drive');
+
 /** Database snapshot into the vault, plus a metadata sidecar per document. */
 export const backupNow = (): Promise<string> => invoke('backup_now');
 

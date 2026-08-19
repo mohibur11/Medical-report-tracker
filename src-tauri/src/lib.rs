@@ -14,11 +14,14 @@ mod presets;
 mod reconcile;
 mod search;
 mod sniff;
+mod sync;
 mod vault;
 
 use std::sync::Mutex;
 
 use tauri::{AppHandle, Emitter, Manager, State};
+
+use crate::sync::BackupTarget;
 
 use crate::db::{Db, DbHealth};
 use crate::ingest::IngestItem;
@@ -345,6 +348,106 @@ fn trash_document(
 }
 
 /// Write a database snapshot into the vault, plus a metadata sidecar per document.
+/// Setting key for the Google Drive (or other synced) folder.
+const DRIVE_FOLDER: &str = "drive_folder";
+const LAST_SYNC: &str = "drive_last_sync";
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DriveStatus {
+    /// The chosen folder, if one has been chosen or found.
+    folder: Option<String>,
+    /// Where the copy is written inside it.
+    backup_path: Option<String>,
+    /// Is it there right now? A Drive folder disappears when the client stops.
+    available: bool,
+    /// Folders that look like Drive mounts, for the "choose one" case.
+    suggestions: Vec<String>,
+    last_sync: Option<String>,
+    /// Does the target already hold a backup that could be restored?
+    has_backup: bool,
+}
+
+fn drive_target(conn: &rusqlite::Connection) -> Option<sync::FolderTarget> {
+    let folder = db::setting(conn, DRIVE_FOLDER)
+        .map(std::path::PathBuf::from)
+        .or_else(|| sync::likely_drive_roots().into_iter().next())?;
+    Some(sync::FolderTarget::new(&folder))
+}
+
+#[tauri::command]
+fn drive_status(state: State<'_, Db>) -> Result<DriveStatus, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let chosen = db::setting(&conn, DRIVE_FOLDER);
+    let suggestions: Vec<String> = sync::likely_drive_roots()
+        .into_iter()
+        .map(|p| p.display().to_string())
+        .collect();
+
+    let target = drive_target(&conn);
+    Ok(DriveStatus {
+        folder: chosen.or_else(|| suggestions.first().cloned()),
+        backup_path: target.as_ref().map(|t| BackupTarget::describe(t)),
+        available: target.as_ref().map(|t| t.available()).unwrap_or(false),
+        has_backup: target.as_ref().and_then(|t| t.snapshot()).is_some(),
+        suggestions,
+        last_sync: db::setting(&conn, LAST_SYNC),
+    })
+}
+
+#[tauri::command]
+fn set_drive_folder(state: State<'_, Db>, folder: String) -> Result<(), String> {
+    let path = std::path::PathBuf::from(&folder);
+    if !path.is_dir() {
+        return Err(format!("{folder} is not a folder on this computer."));
+    }
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    db::set_setting(&conn, DRIVE_FOLDER, &folder)
+}
+
+/// Write the current state of the vault into the Drive folder.
+///
+/// The database snapshot is refreshed first, so what lands in Drive is the
+/// library as it is now rather than as it was at the last close.
+#[tauri::command]
+fn backup_to_drive(
+    app: AppHandle,
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+) -> Result<sync::SyncReport, String> {
+    let vault_root = paths::vault_root(&app)?;
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+
+    let target = drive_target(&conn).ok_or(
+        "No Google Drive folder found. Choose the folder Drive syncs, then try again.",
+    )?;
+
+    backup::write_all_sidecars(&conn, &vault_root, &user.0)?;
+    backup::snapshot(&conn, &vault_root)?;
+
+    let report = target.push(&vault_root)?;
+    db::set_setting(&conn, LAST_SYNC, &chrono_now(&conn))?;
+    Ok(report)
+}
+
+/// Copy back anything missing or different locally.
+#[tauri::command]
+fn restore_from_drive(
+    app: AppHandle,
+    state: State<'_, Db>,
+) -> Result<sync::SyncReport, String> {
+    let vault_root = paths::vault_root(&app)?;
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let target = drive_target(&conn).ok_or("No Google Drive folder is set.")?;
+    target.pull(&vault_root)
+}
+
+/// SQLite owns the clock here, so the timestamp matches every other one stored.
+fn chrono_now(conn: &rusqlite::Connection) -> String {
+    conn.query_row("SELECT datetime('now')", [], |r| r.get::<_, String>(0))
+        .unwrap_or_default()
+}
+
 #[tauri::command]
 fn backup_now(
     app: AppHandle,
@@ -608,7 +711,24 @@ pub fn run() {
             std::fs::create_dir_all(&vault)?;
             std::fs::create_dir_all(paths::staging_dir(handle)?)?;
 
-            let conn = db::open(&paths::db_path(handle)?)?;
+            // A snapshot sits beside the vault, and another in the Drive folder
+            // if one has ever been written. Either can stand in for a database
+            // that is missing or damaged — which is what makes a fresh machine
+            // work: install, let Drive sync, launch.
+            let mut snapshots = vec![vault.join(backup::SNAPSHOT_NAME)];
+            snapshots.extend(
+                sync::likely_drive_roots()
+                    .iter()
+                    .filter_map(|root| sync::FolderTarget::new(root).snapshot()),
+            );
+
+            let (conn, outcome) = db::open_or_restore(&paths::db_path(handle)?, &snapshots)?;
+            if let db::OpenOutcome::Restored { from, kept } = &outcome {
+                eprintln!("database restored from {from}");
+                if !kept.is_empty() {
+                    eprintln!("the unreadable one was kept at {kept}");
+                }
+            }
             let user_id = db::ensure_user(&conn)?;
 
             // Finish any filesystem move a previous run died in the middle of,
@@ -716,6 +836,10 @@ pub fn run() {
             trash_document,
             update_document,
             backup_now,
+            drive_status,
+            set_drive_folder,
+            backup_to_drive,
+            restore_from_drive,
             run_ocr,
             ocr_available,
             lock_state,

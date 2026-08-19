@@ -5,6 +5,7 @@ import { open } from '@tauri-apps/plugin-dialog';
 
 import { BulkBar } from './components/BulkBar.tsx';
 import { CategoryManager, CategoryPicker } from './components/CategoryPicker.tsx';
+import { DrivePanel } from './components/DrivePanel.tsx';
 import { EditRow } from './components/EditRow.tsx';
 import { ExportPanel } from './components/ExportPanel.tsx';
 import { LibraryBulkBar } from './components/LibraryBulkBar.tsx';
@@ -471,6 +472,7 @@ export default function App() {
           <>
             <LockSettings state={lock} onChanged={refreshLock} />
             <VaultTools onRepaired={refresh} />
+            <DrivePanel onRestored={refresh} />
             {patients.length > 0 && <PatientsPanel patients={patients} onChanged={refresh} />}
             <div className="border-b border-slate-200 px-6 py-3 dark:border-slate-800">
               <CategoryManager categories={categories} onChanged={refresh} />

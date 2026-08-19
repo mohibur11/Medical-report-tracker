@@ -185,6 +185,39 @@ Refused, with the reason: an empty name, a name made only of punctuation (it wou
 silently become `Unknown-Patient`), a name that folds onto another patient's folder
 on Windows, and a date of birth later than a report already filed for that patient.
 
+### 4c. A copy in Google Drive
+
+`Library` → **Google Drive**.
+
+This uses the folder Google Drive for desktop already mounts — on this machine
+`G:\My Drive` — rather than signing in to Google from the app. Nothing to
+authorise, no token stored next to a deliberately unencrypted database, and no
+weekly re-authorisation. If Drive is not running, the panel says so instead of
+failing at the moment you press the button.
+
+**Sync with Google Drive** refreshes the sidecars and the database snapshot, then
+copies the vault to `MedicineReportTracker` inside that folder. Files that are
+already identical are skipped, so the second sync of a large archive is fast. What
+arrives is the vault itself — ordinary folders, canonical filenames, a `.meta.json`
+beside each document — readable in a browser without this app. `Exports\` is left
+out on purpose: it rebuilds from the documents and would spend the storage twice.
+
+**Restore from Drive** copies back anything missing locally or different in
+length. It never changes what is in Drive, and files that already match are left
+alone. Worth testing deliberately: delete a filed document in Explorer, restore,
+and it should come back.
+
+**If the database itself is lost or damaged**, the app repairs itself at launch:
+it looks for a snapshot beside the vault, then in the Drive folder, and opens
+that instead. A damaged database is moved aside rather than deleted — it is still
+the newest copy of anything typed since the last snapshot. On a brand-new
+computer: install the app, let Drive finish syncing, launch it, then press
+**Restore from Drive** to bring the documents down.
+
+One thing to be deliberate about: **nothing is encrypted**. That is what makes the
+archive readable from Drive without this app, and it also means anyone with access
+to that Drive folder — or to the account — can read every report in it.
+
 ### 5. Export — the point of the whole thing
 
 Pick a patient, a year, a category, a quality preset, then **Create PDF**. Output
