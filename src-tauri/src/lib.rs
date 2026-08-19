@@ -733,13 +733,15 @@ fn staged_thumb(app: AppHandle, id: String) -> Result<Option<String>, String> {
     }
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// Files handed to the app on the command line — by "Open with", by dropping a
 /// file on the icon, or by a second launch while one is already running.
 ///
 /// Anything that is not an existing file is ignored rather than reported: the
 /// command line also carries flags, and a launch that fails because of one is
 /// worse than a launch that quietly imports nothing.
+///
+/// Desktop only: Android hands files over as intents, not as a command line.
+#[cfg(desktop)]
 fn stage_arguments(app: &AppHandle, argv: &[String]) -> usize {
     let paths: Vec<String> = argv
         .iter()
@@ -773,23 +775,38 @@ fn stage_arguments(app: &AppHandle, argv: &[String]) -> usize {
     }
 }
 
+/// Turn away a second launch, and take whatever file it was carrying.
+///
+/// Desktop only, and separated out because the whole idea does not exist on
+/// Android: the system runs one instance of an app, and there is no command line
+/// for a second one to carry.
+#[cfg(desktop)]
+fn guard_single_instance(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+        use tauri::Manager;
+        // Someone tried to open the app again — by double-clicking the shortcut,
+        // or by sending it a file with "Open with". Show them the window they
+        // already have, and take the file rather than dropping it.
+        stage_arguments(app, &argv);
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }))
+}
+
+#[cfg(not(desktop))]
+fn guard_single_instance(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    builder
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        // Must be registered before anything else: a second launch has to be
-        // turned away before it opens the database, replays the journal, or
-        // starts moving files the first copy is already moving.
-        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
-            use tauri::Manager;
-            // Someone tried to open the app again — by double-clicking the
-            // shortcut, or by sending it a file with "Open with". Show them the
-            // window they already have, and take the file rather than dropping it.
-            stage_arguments(app, &argv);
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-        }))
+    // Registered before anything else: a second launch has to be turned away
+    // before it opens the database, replays the journal, or starts moving files
+    // the first copy is already moving.
+    guard_single_instance(tauri::Builder::default())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle();
@@ -852,10 +869,13 @@ pub fn run() {
 
             // Opened by double-clicking a scan, or by dropping files on the icon.
             // Done after the state is managed, because staging needs both.
-            let argv: Vec<String> = std::env::args().collect();
-            match stage_arguments(handle, &argv) {
-                0 => {}
-                n => eprintln!("staged {n} file(s) from the command line"),
+            #[cfg(desktop)]
+            {
+                let argv: Vec<String> = std::env::args().collect();
+                match stage_arguments(handle, &argv) {
+                    0 => {}
+                    n => eprintln!("staged {n} file(s) from the command line"),
+                }
             }
 
             // Debug builds open devtools automatically. Frontend failures in a

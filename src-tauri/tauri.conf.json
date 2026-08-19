@@ -31,9 +31,6 @@
     "targets": [
       "nsis"
     ],
-    "externalBin": [
-      "binaries/pdfcpu"
-    ],
     "fileAssociations": [
       {
         "ext": ["pdf", "jpg", "jpeg", "png", "tif", "tiff", "webp"],

@@ -63,6 +63,10 @@ unicode-segmentation = "1"
 # One window, one database. SQLite in WAL mode tolerates a second connection, but
 # a second copy of the app means two review queues, two journal replays and two
 # processes racing to move the same files. A second launch focuses the first.
+#
+# Desktop only. Android runs one instance of an app by construction, and the
+# plugin does not build for it.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2.4.3"
 
 # Windows.Media.Ocr — the recognizer already built into Windows 10/11. Zero bundle
