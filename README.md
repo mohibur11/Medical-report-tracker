@@ -8,12 +8,40 @@ to bottom**.
 
 Windows first. Web and Android later.
 
-**Status: usable.** Ingest, review, filing, categories, search, backup, editing and
-merged-PDF export all work; recognition pre-fills the review screen. See
+**Status: usable.** Ingest, review in bulk, filing, categories, search, notes,
+editing, patient rename, merged-PDF export with saved filters, and backup to
+Google Drive all work; recognition pre-fills the review screen. See
 [docs/testing.md](docs/testing.md) for a walkthrough and
 [docs/phase-0-findings.md](docs/phase-0-findings.md) for what was measured.
 
-Still open: patient rename, malformed-PDF repair, code signing.
+Still open: putting a document back from Trash without using Explorer, golden-file
+export tests, accuracy measured on a larger sample, and code signing.
+
+## Backing up to Google Drive
+
+Two ways, and the app picks whichever is available.
+
+**Signing in to a Google account** uploads over the Drive API and works on any
+machine. It needs a one-time setup, because Google issues OAuth credentials per
+application and this one is published as source: a client ID committed here would
+be spent by strangers against the quota and would put someone else's name on the
+consent screen. The panel walks through it — create a Cloud project, enable the
+Drive API, create an **OAuth client ID of type Desktop app**, publish the consent
+screen, paste the ID and secret.
+
+Publishing the consent screen is not optional in practice. Left in **Testing**,
+Google revokes the sign-in every seven days.
+
+**Without an account**, it copies into the folder Google Drive for desktop already
+mounts (`G:\My Drive` and friends), which needs no credentials at all.
+
+Either way, what lands in Drive is the vault itself: ordinary folders, canonical
+filenames, a `.meta.json` beside each document. Readable in a browser without this
+app, which is the point. `Exports/` is left out — it rebuilds from the documents.
+
+The scope requested is `drive.file`, which reaches only files this app created. It
+cannot see the rest of your Drive. Because that scope is non-sensitive, publishing
+the consent screen needs no paid security assessment.
 
 ## Signing the installer
 
@@ -63,8 +91,12 @@ npm run build        # NSIS installer into src-tauri/target/release/bundle
 npm test             # TypeScript unit tests
 npm run typecheck    # tsc --noEmit
 
-cd src-tauri && cargo test   # Rust tests (naming, ingest, vault, export, search, reconciler)
+cd src-tauri && cargo test   # Rust tests (naming, ingest, vault, export, search,
+                             # reconciler, sync, OAuth, DPAPI)
 ```
+
+324 tests at present: 108 TypeScript, 216 Rust. The Rust suite drives real files
+and a real SQLite database rather than mocks, so it takes about half a minute.
 
 All PDF assembly runs through **pdfcpu**, bundled as a Tauri sidecar. It is fetched
 rather than committed, because git keeps every version of a binary forever.
@@ -94,14 +126,25 @@ properties that make the archive outlive the app.
 
 **Use BitLocker** for real protection at rest. It is free on Windows 11 Pro.
 
-### Open security item
+### The one thing that is encrypted
 
-`app.security.csp` is currently `null`, so Tauri's permissive default applies. A
-hand-written CSP was in place and was removed while debugging an unrelated rendering
-fault — it turned out not to be the cause, and was not restored. Before release,
-put a tested CSP back: it must allow the IPC origin (`ipc:` / `http://ipc.localhost`)
-under `connect-src`, `data:` under `img-src` for thumbnails, and `'unsafe-inline'`
-under `style-src` for Vite's injected styles. Tracked for Phase 4 hardening.
+A Google refresh token is not the user's data — it is standing permission to reach
+their Drive, and it stays valid until revoked. So it is sealed with **DPAPI**,
+tied to the Windows account, and a copied database yields nothing. Disconnecting
+revokes it with Google rather than merely forgetting it.
+
+That is the exception. Everything else is plaintext on purpose, as above.
+
+### Hardening already in place
+
+- `app.security.csp` is a hand-written policy, verified against a release build:
+  IPC under `connect-src`, `data:` under `img-src` for thumbnails, `'unsafe-inline'`
+  under `style-src`, and `object-src 'none'`.
+- A single-instance guard, so a second launch focuses the running window instead
+  of opening a second copy to race it over the same files. A file passed to that
+  second launch is handed over rather than dropped.
+- The window is registered as a *viewer* for scans and PDFs, so it appears under
+  "Open with" and takes over as nobody's default.
 
 ## Layout
 
@@ -109,7 +152,16 @@ under `style-src` for Vite's injected styles. Tracked for Phase 4 hardening.
 src/lib/naming/     canonical filenames, path budget, collision suffixes
 src/lib/ingest/     magic-byte type detection, EXIF orientation
 src/lib/extract/    date candidate extraction and ranking
-src-tauri/          Rust: SQLite, file ops, OCR, pdfcpu sidecar
+src/lib/pdf.ts      pdf.js: text already inside a PDF, read before OCR is asked
+src-tauri/src/
+  vault.rs          journalled moves: commit, edit, rename a patient, trash
+  ingest.rs         staging, dedupe, page counts, locked-PDF detection
+  export.rs         the merged PDF, and the loose-files escape hatch
+  ocr.rs            Windows.Media.Ocr, off the database lock, cached
+  sync.rs           BackupTarget, and the Drive-for-desktop folder copy
+  google.rs         OAuth: PKCE, loopback listener, token refresh
+  drive.rs          Drive API: folder mapping, resumable uploads, restore
+  secret.rs         DPAPI, for the one secret worth protecting
 db/migrations/      schema, applied by version and never edited after release
 spikes/             Phase 0 de-risk harnesses, kept as measurement tools
 ```
