@@ -161,14 +161,14 @@ export function GoogleAccountBar({
 
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <input
-              className={`${input} min-w-72 flex-1 font-mono`}
+              className={`${input} w-full font-mono sm:w-auto sm:min-w-72 sm:flex-1`}
               placeholder="000000-xxxx.apps.googleusercontent.com"
               value={clientId}
               onChange={(e) => setClientId(e.target.value)}
               aria-label="Google client ID"
             />
             <input
-              className={`${input} min-w-48 font-mono`}
+              className={`${input} w-full font-mono sm:w-auto sm:min-w-48`}
               type="password"
               placeholder="Client secret"
               value={clientSecret}

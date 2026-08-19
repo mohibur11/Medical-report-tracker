@@ -87,7 +87,7 @@ export function LibraryList({
                 />
               </ul>
             ) : (
-              <div className={`px-6 py-2 ${selected ? 'bg-sky-50 dark:bg-sky-950/40' : ''}`}>
+              <div className={`px-3 py-2 sm:px-6 ${selected ? 'bg-sky-50 dark:bg-sky-950/40' : ''}`}>
                 <div className="flex items-baseline gap-3">
                   <input
                     type="checkbox"
@@ -105,7 +105,9 @@ export function LibraryList({
 
                 {/* Patient, type and tags share the second line. Several categories
                     per document is normal, and none of it should squeeze the title. */}
-                <div className="mt-1 flex flex-wrap items-center gap-2 pl-32 text-xs text-slate-500 dark:text-slate-400">
+                {/* Indented to clear the date column on a wide screen; on a phone
+                    there is no room to give away. */}
+                <div className="mt-1 flex flex-wrap items-center gap-2 pl-7 text-xs text-slate-500 sm:pl-32 dark:text-slate-400">
                   <span>{d.patient}</span>
                   <span className="text-slate-400">
                     {d.fileKind.toUpperCase()}

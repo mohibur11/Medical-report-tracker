@@ -83,7 +83,7 @@ export function EditRow({
     'focus:border-sky-500 dark:border-slate-600 dark:bg-slate-800';
 
   return (
-    <li className="border-l-2 border-sky-500 bg-sky-50/40 px-6 py-3 dark:bg-sky-950/20">
+    <li className="border-l-2 border-sky-500 bg-sky-50/40 px-3 py-3 sm:px-6 dark:bg-sky-950/20">
       <div className="flex flex-wrap items-center gap-2">
         <input
           className={`${input} w-28 font-mono`}
@@ -93,7 +93,7 @@ export function EditRow({
           aria-label="Date"
         />
         <input
-          className={`${input} min-w-52 flex-1`}
+          className={`${input} w-full sm:w-auto sm:min-w-52 sm:flex-1`}
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           onKeyDown={(e) => {

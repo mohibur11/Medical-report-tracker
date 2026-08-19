@@ -79,7 +79,7 @@ export function PatientsPanel({
           editing === p.id ? (
             <li key={p.id} className="flex flex-wrap items-center gap-2">
               <input
-                className={`${input} min-w-52`}
+                className={`${input} w-full sm:w-auto sm:min-w-52`}
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 aria-label="Patient name"
@@ -115,7 +115,7 @@ export function PatientsPanel({
             </li>
           ) : (
             <li key={p.id} className="flex flex-wrap items-center gap-2 text-sm">
-              <span className="min-w-40">{p.displayName}</span>
+              <span className="min-w-0 sm:min-w-40">{p.displayName}</span>
               <span className="text-xs text-slate-500 dark:text-slate-400">
                 {p.dob ? `born ${formatDmy(p.dob)}` : 'no date of birth'}
                 {' · '}

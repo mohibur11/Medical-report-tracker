@@ -233,7 +233,7 @@ export function ReviewRow({
 
   return (
     <li
-      className={`flex items-start gap-4 px-6 py-3 ${
+      className={`flex items-start gap-2 px-3 py-3 sm:gap-4 sm:px-6 ${
         selected ? 'bg-sky-50 dark:bg-sky-950/40' : ''
       }`}
     >
@@ -260,14 +260,15 @@ export function ReviewRow({
 
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <input
-            className={`${input} w-28 font-mono`}
+            className={`${input} w-28 shrink-0 font-mono`}
             placeholder="dd/mm/yyyy"
             value={date}
             onChange={(e) => setDate(e.target.value)}
             aria-label="Date"
           />
           <input
-            className={`${input} min-w-52 flex-1`}
+            // Full width of its own line on a phone; shares the row on a desktop.
+            className={`${input} w-full sm:w-auto sm:min-w-52 sm:flex-1`}
             placeholder="Test or report name"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
@@ -275,7 +276,7 @@ export function ReviewRow({
             aria-label="Title"
           />
           <select
-            className={input}
+            className={`${input} min-w-0 flex-1 sm:flex-none`}
             value={patientId}
             onChange={(e) => setPatientId(e.target.value)}
             aria-label="Patient"
@@ -288,7 +289,7 @@ export function ReviewRow({
             ))}
           </select>
           <select
-            className={input}
+            className={`${input} min-w-0 flex-1 sm:flex-none`}
             value={docType}
             onChange={(e) => setDocType(e.target.value)}
             aria-label="Type"
