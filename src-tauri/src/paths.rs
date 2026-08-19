@@ -19,12 +19,14 @@ pub fn vault_root(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(docs.join(VAULT_DIR_NAME))
 }
 
-/// The live database: `%LOCALAPPDATA%\<identifier>\app.db`.
+/// The live database. Windows: `%LOCALAPPDATA%\<identifier>\app.db`.
+/// Android: internal app storage, which no file manager can reach.
 ///
-/// NEVER inside the vault. The vault sits in Documents, which is routinely
-/// OneDrive-synced, and a WAL sidecar synced mid-transaction is a documented
-/// corruption path. The backup story is a `VACUUM INTO` snapshot written into the
-/// vault on close, not the live file.
+/// NEVER inside the vault, on either platform. On Windows the vault sits in
+/// Documents, which is routinely OneDrive-synced, and a WAL sidecar synced
+/// mid-transaction is a documented corruption path; on Android the vault is
+/// external storage, readable by anything that knows the path. The backup
+/// story is a `VACUUM INTO` snapshot written into the vault, not the live file.
 pub fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()
