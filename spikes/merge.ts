@@ -23,9 +23,10 @@ import { readJpegOrientation, sniff, type FileKind } from '../src/lib/ingest/sni
 
 const run = promisify(execFile);
 
+// The bundled sidecar, which `npm run fetch:sidecar` puts in place. Override
+// with PDFCPU_PATH to try a different build.
 const PDFCPU =
-  process.env.PDFCPU_PATH ??
-  'C:\\Users\\mohibur\\AppData\\Local\\Temp\\claude\\d--Personal-Work-Claude-Code-Medicine-Report-Tracker\\406616cd-f3c5-49b1-95c7-f8be85323dec\\scratchpad\\pdfcpu\\pdfcpu_0.15.0_Windows_x86_64\\pdfcpu.exe';
+  process.env.PDFCPU_PATH ?? 'src-tauri/binaries/pdfcpu-x86_64-pc-windows-msvc.exe';
 
 type Preset = 'original' | 'standard' | 'email';
 

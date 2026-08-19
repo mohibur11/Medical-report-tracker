@@ -296,7 +296,7 @@ pub fn parse_file_name(file_name: &str) -> Option<ParsedName> {
 mod tests {
     use super::*;
 
-    const ROOT_LEN: usize = 49; // "C:\Users\mohibur\Documents\MedicineReportTracker\"
+    const ROOT_LEN: usize = 49; // "C:\Users\a-user\Documents\MedicineReportTracker\"
 
     #[test]
     fn a_canonical_name_round_trips_back_into_its_parts() {
@@ -421,7 +421,7 @@ mod tests {
 
     #[test]
     fn a_deep_onedrive_root_still_fits() {
-        let deep = "C:\\Users\\mohibur\\OneDrive - Some Long Organisation Name\\Documents\\MedicineReportTracker\\".len();
+        let deep = "C:\\Users\\a-user\\OneDrive - Some Long Organisation Name\\Documents\\MedicineReportTracker\\".len();
         let b = build_name(
             "2026-03-14",
             "Mohammad Rahim Uddin Chowdhury",

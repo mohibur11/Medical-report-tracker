@@ -15,7 +15,7 @@ import {
 
 import { readFileSync } from 'node:fs';
 
-const ROOT_LEN = 'C:\\Users\\mohibur\\Documents\\MedicineReportTracker\\'.length;
+const ROOT_LEN = 'C:\\Users\\a-user\\Documents\\MedicineReportTracker\\'.length;
 
 /**
  * The same table `src-tauri/src/naming.rs` runs against. Two implementations of
@@ -177,7 +177,7 @@ test('path never exceeds MAX_PATH even with hostile input', () => {
 });
 
 test('a deeply nested vault root still yields a legal path', () => {
-  const deepRoot = 'C:\\Users\\mohibur\\OneDrive - Some Long Organisation Name\\Documents\\MedicineReportTracker\\'.length;
+  const deepRoot = 'C:\\Users\\a-user\\OneDrive - Some Long Organisation Name\\Documents\\MedicineReportTracker\\'.length;
   const b = buildName(
     {
       docDate: '2026-03-14',

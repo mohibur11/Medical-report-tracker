@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn a_set_password_verifies_and_a_wrong_one_does_not() {
         let f = Fx::new();
-        set_password(&f.conn, &f.user, "mohibur818@gmail.com", "correct horse battery").unwrap();
+        set_password(&f.conn, &f.user, "someone@example.com", "correct horse battery").unwrap();
 
         assert!(is_enabled(&f.conn).unwrap());
         assert!(verify(&f.conn, "correct horse battery").unwrap());
@@ -236,8 +236,8 @@ mod tests {
     #[test]
     fn the_email_is_stored_but_is_not_the_identity() {
         let f = Fx::new();
-        set_password(&f.conn, &f.user, "  mohibur818@gmail.com  ", "correct horse battery").unwrap();
-        assert_eq!(email(&f.conn).unwrap(), "mohibur818@gmail.com");
+        set_password(&f.conn, &f.user, "  someone@example.com  ", "correct horse battery").unwrap();
+        assert_eq!(email(&f.conn).unwrap(), "someone@example.com");
 
         // The primary key is still the ULID it always was.
         let id: String = f.conn.query_row("SELECT id FROM users", [], |r| r.get(0)).unwrap();
