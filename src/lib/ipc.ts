@@ -67,6 +67,14 @@ export const stagedThumb = (id: string): Promise<string | null> =>
 export const listStaged = (): Promise<IngestItem[]> => invoke('list_staged');
 
 /**
+ * Import anything shared to the app since it last looked.
+ *
+ * Android only in practice: a photo shared from the camera roll or WhatsApp is
+ * copied into the app's storage by the activity, and this is what picks it up.
+ */
+export const takeShared = (): Promise<IngestItem[]> => invoke('take_shared');
+
+/**
  * Remove password protection from a staged PDF.
  *
  * pdfcpu repairs structural damage on its own, so a password is the one thing

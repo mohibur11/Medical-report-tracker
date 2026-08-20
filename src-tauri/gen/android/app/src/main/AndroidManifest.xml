@@ -16,6 +16,22 @@
             android:label="@string/main_activity_title"
             android:name=".MainActivity"
             android:exported="true">
+            <!-- Share a photo or a PDF to this app from anywhere: the camera roll,
+                 WhatsApp, a mail attachment. On a phone this is the capture path
+                 that actually gets used. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="application/pdf" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="application/pdf" />
+            </intent-filter>
+
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

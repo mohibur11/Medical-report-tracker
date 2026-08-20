@@ -57,6 +57,26 @@ async fn import_files(
     ingest::stage_batch(&conn, &user.0, &staging, &paths_in)
 }
 
+/// Import anything that was shared to the app since it last looked.
+///
+/// Called by the phone front end when it opens and whenever it comes back to the
+/// foreground, which is exactly when a share has just happened.
+#[tauri::command]
+fn take_shared(
+    app: AppHandle,
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+) -> Result<Vec<IngestItem>, String> {
+    let local = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("cannot resolve local app data folder: {e}"))?;
+    let staging = paths::staging_dir(&app)?;
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    ingest::take_shared(&conn, &user.0, &local, &staging)
+}
+
+
 /// The review queue as the database has it, so a half-finished import survives
 /// closing the app.
 /// Unlock a password-protected PDF that is waiting in the queue.
@@ -977,6 +997,7 @@ pub fn run() {
             db_health,
             import_files,
             list_staged,
+            take_shared,
             staged_pdf_text_source,
             unlock_pdf,
             staged_thumb,

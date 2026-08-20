@@ -61,6 +61,17 @@ the difference is entirely symbols. If an APK comes out unexpectedly large, clea
 repackage: Gradle can leave stale data inside the archive, producing a 216 MB
 file whose contents measure 42 MB.
 
+## Sharing a report to the app
+
+The app appears in Android's share sheet for images and PDFs. Sharing one copies
+it into the app's own storage — the web view and `std::fs` can do nothing with a
+`content://` URI, so the activity pulls the bytes out first — and the app imports
+it the next time it comes to the foreground, which is immediately, because
+sharing brings it forward.
+
+Shared files go through exactly the same ingest as a file chosen from disk:
+hashed, de-duplicated, straightened. There is no second path for them.
+
 ## Installing
 
 Copy the APK to the phone and open it in Files. It is debug-signed, which is what

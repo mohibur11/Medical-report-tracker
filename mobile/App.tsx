@@ -10,6 +10,7 @@ import {
   listDocuments,
   listPatients,
   listStaged,
+  takeShared,
   type Category,
   type DocumentRow,
   type IngestItem,
@@ -55,6 +56,32 @@ export default function App() {
   }, []);
 
   useEffect(refresh, [refresh]);
+
+  /**
+   * Pick up anything shared to the app.
+   *
+   * On opening, and again whenever the app comes back to the foreground — which
+   * is exactly the moment a share has just happened, because sharing brings this
+   * app forward.
+   */
+  useEffect(() => {
+    const collect = () => {
+      takeShared().then(
+        (staged) => {
+          if (staged.length > 0) {
+            setTab('capture');
+            refresh();
+          }
+        },
+        () => {},
+      );
+    };
+
+    collect();
+    const onVisible = () => document.visibilityState === 'visible' && collect();
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [refresh]);
 
   const waiting = items.filter(
     (i) => i.status === 'needs_date' || i.status === 'pending' || i.status === 'locked',

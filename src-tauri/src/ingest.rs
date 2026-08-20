@@ -147,6 +147,50 @@ pub fn list_staged(conn: &Connection, user_id: &str) -> Result<Vec<IngestItem>, 
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
+/// Take anything that was shared to the app and stage it.
+///
+/// Android hands a shared file over as a `content://` URI, which nothing on the
+/// Rust side can open, so the activity copies the bytes into the app's own
+/// storage first. This picks them up from there and puts them through exactly the
+/// same ingest as a file chosen from disk — hashing, de-duplication, orientation
+/// and all — rather than growing a second path for shared files.
+pub fn take_shared(
+    conn: &Connection,
+    user_id: &str,
+    local_data: &Path,
+    staging: &Path,
+) -> Result<Vec<IngestItem>, String> {
+    // Two candidates because the activity writes to `filesDir` while Tauri
+    // resolves the app's data directory, and the two differ by a level.
+    let inboxes = [
+        local_data.join("shared-inbox"),
+        local_data.join("files").join("shared-inbox"),
+    ];
+
+    let mut paths = Vec::new();
+    for inbox in &inboxes {
+        let Ok(entries) = std::fs::read_dir(inbox) else { continue };
+        for entry in entries.flatten() {
+            if entry.path().is_file() {
+                paths.push(entry.path().display().to_string());
+            }
+        }
+    }
+
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let staged = stage_batch(conn, user_id, staging, &paths)?;
+
+    // The copy in the inbox has served its purpose; ingest keeps its own.
+    for path in &paths {
+        let _ = std::fs::remove_file(path);
+    }
+
+    Ok(staged)
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
