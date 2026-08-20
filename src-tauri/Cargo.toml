@@ -49,10 +49,14 @@ base64 = "0.22"
 # Google Drive over HTTPS. rustls rather than the platform TLS stack so the build
 # does not depend on OpenSSL being present, and blocking because every Drive call
 # happens inside a command that is already off the UI thread.
+# webpki-roots rather than the platform certificate store: Android does not
+# expose one the way a desktop does, and without roots every HTTPS call fails
+# with "error sending request" long after the sign-in itself has succeeded.
+# Compiling the roots in also makes TLS behave identically on both platforms.
 reqwest = { version = "0.12", default-features = false, features = [
   "blocking",
   "json",
-  "rustls-tls",
+  "rustls-tls-webpki-roots",
 ] }
 
 # Filenames must be NFC-normalized (NTFS compares ordinally and does no

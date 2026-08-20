@@ -89,7 +89,12 @@ refuses it. Expect a Play Protect warning about an unknown developer.
   report has not been tested.
 - **PDFs are not read on Android.** Page images are extracted with pdfcpu, which
   cannot run there, so recognition covers photographs only.
-- **Google Drive sign-in should work, and is unverified.** The loopback listener
+- **HTTPS needs the roots compiled in.** reqwest's `rustls-tls` reads the
+  platform certificate store, which Android does not expose the way a desktop
+  does, so every call failed with "error sending request" — including the token
+  exchange, long after the sign-in itself had succeeded. The build uses
+  `rustls-tls-webpki-roots` instead.
+- **Google Drive sign-in reaches the token exchange.** The loopback listener
   binds inside the app and the browser on the same phone can reach it, so the
   desktop OAuth client is reused as-is. Opening the browser goes through the
   opener plugin rather than the Windows-only call it used before. Whether Chrome
