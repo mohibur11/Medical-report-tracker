@@ -72,9 +72,18 @@ refuses it. Expect a Play Protect warning about an unknown developer.
 - **OCR reads nothing.** `Windows.Media.Ocr` has no Android equivalent; the
   fallback returns empty. ML Kit through a Tauri plugin is the intended
   replacement, and until it exists nothing pre-fills in the review screen.
-- **Google Drive sign-in cannot complete.** The loopback listener is not
-  reachable on Android, so the redirect needs to become an app link, and the
-  refresh token needs Android Keystore rather than DPAPI.
+- **Google Drive sign-in should work, and is unverified.** The loopback listener
+  binds inside the app and the browser on the same phone can reach it, so the
+  desktop OAuth client is reused as-is. Opening the browser goes through the
+  opener plugin rather than the Windows-only call it used before. Whether Chrome
+  Custom Tabs will follow a `http://127.0.0.1:PORT` redirect back to the app has
+  not been tested on a device.
+- **The refresh token is not encrypted on Android.** On Windows DPAPI protects one
+  row in a database that anyone with the user's files can read. Android does not
+  have that problem — the database is in internal app storage, which no other app
+  and no file manager can reach. The sandbox is the boundary instead. That is
+  weaker than DPAPI against a rooted phone or a full-device backup, and Android
+  Keystore would close the gap; it needs a JNI binding this app does not have.
 - **Export fails.** All PDF assembly runs through the pdfcpu sidecar, and Android
   does not permit executing bundled binaries. Merged export is deliberately a
   desktop feature.

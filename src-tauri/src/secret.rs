@@ -52,13 +52,36 @@ pub fn unprotect(sealed: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
-/// Elsewhere this is a no-op, and the caller must not pretend otherwise.
-#[cfg(not(windows))]
+/// On Android the operating system is the boundary.
+///
+/// DPAPI exists on Windows to protect one row in a database that anyone with the
+/// user's files can read — the vault sits in Documents and the database beside
+/// it, both plainly readable. Android does not have that problem: the database
+/// lives in internal app storage, which no other app and no file manager can
+/// reach, and which is removed with the app.
+///
+/// So the token is stored as it is, and the sandbox is what guards it. This is a
+/// weaker guarantee than DPAPI against a rooted phone or a full-device backup,
+/// and it is written down rather than dressed up. Android Keystore would close
+/// that gap and needs a JNI binding this app does not have yet.
+#[cfg(target_os = "android")]
+pub fn protect(plain: &[u8]) -> Result<Vec<u8>, String> {
+    Ok(plain.to_vec())
+}
+
+#[cfg(target_os = "android")]
+pub fn unprotect(sealed: &[u8]) -> Result<Vec<u8>, String> {
+    Ok(sealed.to_vec())
+}
+
+/// Anywhere else, refusing is the honest answer: storing a Google refresh token
+/// in the clear beside a readable database is not a trade to make quietly.
+#[cfg(not(any(windows, target_os = "android")))]
 pub fn protect(_plain: &[u8]) -> Result<Vec<u8>, String> {
     Err("no secret store on this platform".into())
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "android")))]
 pub fn unprotect(_sealed: &[u8]) -> Result<Vec<u8>, String> {
     Err("no secret store on this platform".into())
 }

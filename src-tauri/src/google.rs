@@ -164,7 +164,14 @@ pub struct Tokens {
 /// Takes no database handle on purpose. This blocks for as long as the person
 /// takes to choose an account and press Allow, and holding the connection across
 /// that would freeze every other part of the app while they did it.
-pub fn run_flow(client_id: &str, client_secret: &str) -> Result<Tokens, String> {
+///
+/// `open_url` is supplied by the caller because opening a browser is the one step
+/// with no portable answer: a shell call on Windows, an intent on Android.
+pub fn run_flow(
+    client_id: &str,
+    client_secret: &str,
+    open_url: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<Tokens, String> {
 
     // Port 0 asks the OS for a free one; Google allows any port on loopback.
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -196,7 +203,7 @@ pub fn run_flow(client_id: &str, client_secret: &str) -> Result<Tokens, String> 
         percent_encode(&state),
     );
 
-    open_in_browser(&url)?;
+    open_url(&url)?;
 
     let code = wait_for_code(listener, &state)?;
 
@@ -385,16 +392,6 @@ fn decode_component(value: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).to_string()
-}
-
-fn open_in_browser(url: &str) -> Result<(), String> {
-    // rundll32 rather than `start`, which is a shell builtin and would need cmd
-    // with its own quoting rules around a URL full of ampersands.
-    std::process::Command::new("rundll32.exe")
-        .args(["url.dll,FileProtocolHandler", url])
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("cannot open the browser: {e}"))
 }
 
 fn fetch_email(access_token: &str) -> Option<String> {

@@ -455,7 +455,10 @@ fn set_google_client(
 
 /// Sign in to Google. Opens the browser and waits for the answer.
 #[tauri::command]
-async fn connect_google(state: State<'_, Db>) -> Result<google::Account, String> {
+async fn connect_google(
+    app: AppHandle,
+    state: State<'_, Db>,
+) -> Result<google::Account, String> {
     // The database lock is taken twice, briefly, and never while the browser is
     // open: signing in takes as long as the person takes, and holding it would
     // freeze every other part of the app until they finished.
@@ -464,8 +467,17 @@ async fn connect_google(state: State<'_, Db>) -> Result<google::Account, String>
         google::client_credentials(&conn)?
     };
 
+    // The browser is opened through the opener plugin, which knows how to do it
+    // on each platform — a process on Windows, an intent on Android.
+    let opener = app.clone();
     let tokens = tauri::async_runtime::spawn_blocking(move || {
-        google::run_flow(&client_id, &client_secret)
+        google::run_flow(&client_id, &client_secret, |url| {
+            use tauri_plugin_opener::OpenerExt;
+            opener
+                .opener()
+                .open_url(url, None::<&str>)
+                .map_err(|e| format!("cannot open the browser: {e}"))
+        })
     })
     .await
     .map_err(|e| format!("the sign-in did not finish: {e}"))??;
@@ -808,6 +820,7 @@ pub fn run() {
     // the first copy is already moving.
     guard_single_instance(tauri::Builder::default())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let handle = app.handle();
 

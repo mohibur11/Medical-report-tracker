@@ -28,3 +28,6 @@ src-tauri/gen/android/.idea/
 
 # The phone front end, built by npm run build:mobile
 dist-mobile/
+
+# Google OAuth client downloads. These belong on the machine, never in the repo.
+client_secret_*.json
