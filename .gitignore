@@ -25,3 +25,6 @@ src-tauri/gen/android/app/src/main/jniLibs/
 src-tauri/gen/android/build/
 src-tauri/gen/android/local.properties
 src-tauri/gen/android/.idea/
+
+# The phone front end, built by npm run build:mobile
+dist-mobile/

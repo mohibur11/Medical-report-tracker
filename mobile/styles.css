@@ -1,0 +1,41 @@
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: 'Roboto', 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'Roboto Mono', ui-monospace, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  /* A phone app that bounces at the edges of a list feels like a web page. */
+  overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* The bars the system draws over the app. Read once here so no screen has to
+   remember them. */
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.pad-top {
+  padding-top: calc(var(--safe-top) + 0.5rem);
+}
+
+.pad-bottom {
+  padding-bottom: calc(var(--safe-bottom) + 0.5rem);
+}
+
+.selectable {
+  -webkit-user-select: text;
+  user-select: text;
+}
