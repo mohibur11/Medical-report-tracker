@@ -1,9 +1,8 @@
 import { useState } from 'react';
-import { open } from '@tauri-apps/plugin-dialog';
 
 import { ReviewCard } from './ReviewCard.tsx';
 import {
-  importFiles,
+  pickAndImport,
   type Category,
   type IngestItem,
   type Patient,
@@ -41,17 +40,12 @@ export function Capture({
   async function add() {
     setBusy(true);
     try {
-      const picked = await open({
-        multiple: true,
-        title: 'Choose reports',
-        filters: [
-          { name: 'Reports', extensions: ['jpg', 'jpeg', 'png', 'pdf', 'tif', 'tiff', 'webp'] },
-        ],
-      });
-      if (picked) {
-        await importFiles(Array.isArray(picked) ? picked : [picked]);
-        onChanged();
-      }
+      // Goes through the phone's own picker rather than the desktop dialog: that
+      // one hands back a content:// URI, which the backend cannot open, so the
+      // button appeared to work and imported nothing.
+      const staged = await pickAndImport();
+      if (staged.length > 0) onChanged();
+      else onError('Nothing was added. If you chose a file, tell me — that is a bug.');
     } catch (e) {
       onError(String(e));
     } finally {

@@ -75,6 +75,14 @@ export const listStaged = (): Promise<IngestItem[]> => invoke('list_staged');
 export const takeShared = (): Promise<IngestItem[]> => invoke('take_shared');
 
 /**
+ * Choose files on a phone and import them.
+ *
+ * Android only: the file dialog answers with a content:// URI that Rust cannot
+ * open, so the picker copies the bytes across first.
+ */
+export const pickAndImport = (): Promise<IngestItem[]> => invoke('pick_and_import');
+
+/**
  * Remove password protection from a staged PDF.
  *
  * pdfcpu repairs structural damage on its own, so a password is the one thing

@@ -57,6 +57,38 @@ async fn import_files(
     ingest::stage_batch(&conn, &user.0, &staging, &paths_in)
 }
 
+/// Ask the phone for files and import them.
+///
+/// The desktop file dialog cannot be used here: Android answers it with a
+/// content:// URI, which nothing on the Rust side can open, so the Add button
+/// appeared to do nothing at all. The picker copies the bytes into the same inbox
+/// a shared file lands in, and this then imports them the same way.
+#[tauri::command]
+fn pick_and_import(
+    app: AppHandle,
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+) -> Result<Vec<IngestItem>, String> {
+    #[cfg(target_os = "android")]
+    {
+        ocr::pick_files()?;
+        let local = app
+            .path()
+            .app_local_data_dir()
+            .map_err(|e| format!("cannot resolve local app data folder: {e}"))?;
+        let staging = paths::staging_dir(&app)?;
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        return ingest::take_shared(&conn, &user.0, &local, &staging);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (&app, &state, &user);
+        Err("The desktop app uses its own file dialog.".into())
+    }
+}
+
+
 /// Import anything that was shared to the app since it last looked.
 ///
 /// Called by the phone front end when it opens and whenever it comes back to the
@@ -998,6 +1030,7 @@ pub fn run() {
             import_files,
             list_staged,
             take_shared,
+            pick_and_import,
             staged_pdf_text_source,
             unlock_pdf,
             staged_thumb,

@@ -159,6 +159,27 @@ pub fn recognize(path: &std::path::Path) -> Result<OcrPage, String> {
         .map_err(|e| format!("cannot read this page: {e}"))
 }
 
+/// Ask the phone for files, copying them into the shared inbox.
+///
+/// Returns how many were taken; `ingest::take_shared` is what turns them into
+/// staged rows, so a picked file and a shared one follow exactly the same path.
+#[cfg(target_os = "android")]
+pub fn pick_files() -> Result<u32, String> {
+    #[derive(serde::Deserialize)]
+    struct Picked {
+        taken: u32,
+    }
+
+    let handle = ANDROID_OCR
+        .get()
+        .ok_or("the file picker was not available when the app started")?;
+
+    handle
+        .run_mobile_plugin::<Picked>("pick", ())
+        .map(|p| p.taken)
+        .map_err(|e| format!("cannot open the file picker: {e}"))
+}
+
 #[cfg(target_os = "android")]
 pub fn available() -> bool {
     ANDROID_OCR.get().is_some()
