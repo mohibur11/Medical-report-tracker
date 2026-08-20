@@ -29,7 +29,7 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:mimeType="image/webp" />
+                <data android:mimeType="image/png" />
                 <data android:pathPattern=".*\\.pdf" />
                 <data android:pathPattern=".*\\.jpg" />
                 <data android:pathPattern=".*\\.jpeg" />
@@ -45,21 +45,6 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:mimeType="application/pdf" />
-                <data android:pathPattern=".*\\.pdf" />
-                <data android:pathPattern=".*\\.jpg" />
-                <data android:pathPattern=".*\\.jpeg" />
-                <data android:pathPattern=".*\\.png" />
-                <data android:pathPattern=".*\\.tif" />
-                <data android:pathPattern=".*\\.tiff" />
-                <data android:pathPattern=".*\\.webp" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.SEND" />
-                <action android:name="android.intent.action.SEND_MULTIPLE" />
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:mimeType="image/png" />
                 <data android:pathPattern=".*\\.pdf" />
                 <data android:pathPattern=".*\\.jpg" />
                 <data android:pathPattern=".*\\.jpeg" />
@@ -90,6 +75,21 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:mimeType="image/tiff" />
+                <data android:pathPattern=".*\\.pdf" />
+                <data android:pathPattern=".*\\.jpg" />
+                <data android:pathPattern=".*\\.jpeg" />
+                <data android:pathPattern=".*\\.png" />
+                <data android:pathPattern=".*\\.tif" />
+                <data android:pathPattern=".*\\.tiff" />
+                <data android:pathPattern=".*\\.webp" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:mimeType="image/webp" />
                 <data android:pathPattern=".*\\.pdf" />
                 <data android:pathPattern=".*\\.jpg" />
                 <data android:pathPattern=".*\\.jpeg" />

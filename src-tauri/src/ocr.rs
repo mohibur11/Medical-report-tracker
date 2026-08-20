@@ -124,7 +124,47 @@ pub fn recognize(path: &std::path::Path) -> Result<OcrPage, String> {
     })
 }
 
-#[cfg(not(windows))]
+/// The handle onto the Kotlin side, set once when the app starts.
+///
+/// A global because recognition is reached from deep inside the ingest path,
+/// which has no reason to carry an app handle around for the one platform that
+/// needs it.
+#[cfg(target_os = "android")]
+static ANDROID_OCR: std::sync::OnceLock<tauri::plugin::PluginHandle<tauri::Wry>> =
+    std::sync::OnceLock::new();
+
+#[cfg(target_os = "android")]
+pub fn set_android_handle(handle: tauri::plugin::PluginHandle<tauri::Wry>) {
+    let _ = ANDROID_OCR.set(handle);
+}
+
+#[cfg(target_os = "android")]
+pub fn recognize(path: &std::path::Path) -> Result<OcrPage, String> {
+    #[derive(serde::Serialize)]
+    struct Args {
+        path: String,
+    }
+
+    let handle = ANDROID_OCR
+        .get()
+        .ok_or("the text recogniser was not available when the app started")?;
+
+    handle
+        .run_mobile_plugin::<OcrPage>(
+            "recognize",
+            Args {
+                path: path.display().to_string(),
+            },
+        )
+        .map_err(|e| format!("cannot read this page: {e}"))
+}
+
+#[cfg(target_os = "android")]
+pub fn available() -> bool {
+    ANDROID_OCR.get().is_some()
+}
+
+#[cfg(not(any(windows, target_os = "android")))]
 pub fn recognize(_path: &std::path::Path) -> Result<OcrPage, String> {
     Err("OCR is only available on Windows in this build.".into())
 }
@@ -135,7 +175,7 @@ pub fn available() -> bool {
     windows::Media::Ocr::OcrEngine::TryCreateFromUserProfileLanguages().is_ok()
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "android")))]
 pub fn available() -> bool {
     false
 }

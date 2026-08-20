@@ -69,9 +69,15 @@ refuses it. Expect a Play Protect warning about an unknown developer.
 
 ## What does not work yet
 
-- **OCR reads nothing.** `Windows.Media.Ocr` has no Android equivalent; the
-  fallback returns empty. ML Kit through a Tauri plugin is the intended
-  replacement, and until it exists nothing pre-fills in the review screen.
+- **OCR is wired to ML Kit and unverified on a device.** `Windows.Media.Ocr` has
+  no Android equivalent, so `OcrPlugin.kt` uses ML Kit's on-device Latin
+  recogniser — bundled rather than the Play-services variant, so it works with no
+  Google Play and makes no network call. It returns the same text and word boxes
+  the Windows recogniser does, which is what lets the date ranker behave
+  identically on both. It compiles and packages; whether it recognises a real
+  report has not been tested.
+- **PDFs are not read on Android.** Page images are extracted with pdfcpu, which
+  cannot run there, so recognition covers photographs only.
 - **Google Drive sign-in should work, and is unverified.** The loopback listener
   binds inside the app and the browser on the same phone can reach it, so the
   desktop OAuth client is reused as-is. Opening the browser goes through the

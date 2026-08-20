@@ -59,6 +59,10 @@ rust {
 
 dependencies {
     implementation("androidx.webkit:webkit:1.14.0")
+    // On-device text recognition. Bundled rather than the Play-services variant so
+    // it works on a phone with no Google Play, and so nothing about a medical
+    // record depends on a network call.
+    implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.10.1")
     implementation("com.google.android.material:material:1.12.0")

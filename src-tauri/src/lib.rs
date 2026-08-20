@@ -813,6 +813,30 @@ fn guard_single_instance(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<
     builder
 }
 
+/// Wire up the Kotlin text recogniser on Android, and nothing anywhere else.
+///
+/// Registered as a plugin because that is how Tauri reaches Kotlin; the handle is
+/// then handed to the ocr module, which is where the rest of the app already
+/// asks for text.
+#[cfg(target_os = "android")]
+fn android_ocr() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::new("mlkit-ocr")
+        .setup(|_app, api| {
+            let handle = api.register_android_plugin(
+                "com.mohibur.medicinereporttracker",
+                "OcrPlugin",
+            )?;
+            ocr::set_android_handle(handle);
+            Ok(())
+        })
+        .build()
+}
+
+#[cfg(not(target_os = "android"))]
+fn android_ocr() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    tauri::plugin::Builder::new("mlkit-ocr").build()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Registered before anything else: a second launch has to be turned away
@@ -821,6 +845,7 @@ pub fn run() {
     guard_single_instance(tauri::Builder::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(android_ocr())
         .setup(|app| {
             let handle = app.handle();
 
