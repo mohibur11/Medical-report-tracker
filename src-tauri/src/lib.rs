@@ -337,6 +337,31 @@ fn update_document(
     )
 }
 
+/// What is in the Trash, and whether each one can still be put back.
+#[tauri::command]
+fn list_trashed(
+    app: AppHandle,
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+) -> Result<Vec<vault::TrashedDocument>, String> {
+    let vault_root = paths::vault_root(&app)?;
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    vault::list_trashed(&conn, &user.0, &vault_root)
+}
+
+/// Put a trashed document back where it was.
+#[tauri::command]
+fn restore_document(
+    app: AppHandle,
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+    document_id: String,
+) -> Result<(), String> {
+    let vault_root = paths::vault_root(&app)?;
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    vault::restore(&conn, &user.0, &vault_root, &document_id)
+}
+
 /// Move a document to the vault's Trash folder. Nothing is unlinked.
 #[tauri::command]
 fn trash_document(
@@ -980,6 +1005,8 @@ pub fn run() {
             reindex,
             rescan_vault,
             trash_document,
+            list_trashed,
+            restore_document,
             update_document,
             backup_now,
             drive_status,

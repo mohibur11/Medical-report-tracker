@@ -211,6 +211,23 @@ export const updateDocument = (args: {
   notes: string;
 }): Promise<CommittedDocument> => invoke('update_document', args);
 
+export interface TrashedDocument {
+  id: string;
+  title: string;
+  patient: string;
+  docDate: string;
+  relPath: string;
+  trashedAt: string;
+  /** False when the file has left the Trash folder — moved or emptied by hand. */
+  recoverable: boolean;
+}
+
+export const listTrashed = (): Promise<TrashedDocument[]> => invoke('list_trashed');
+
+/** Put a trashed document back exactly where it was. */
+export const restoreDocument = (documentId: string): Promise<void> =>
+  invoke('restore_document', { documentId });
+
 /** Move a document to the vault's Trash folder. Nothing is unlinked. */
 export const trashDocument = (documentId: string): Promise<void> =>
   invoke('trash_document', { documentId });

@@ -798,6 +798,109 @@ pub fn trash(
     Ok(())
 }
 
+/// A document in the vault's Trash, and where it came from.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrashedDocument {
+    pub id: String,
+    pub title: String,
+    pub patient: String,
+    pub doc_date: String,
+    pub rel_path: String,
+    pub trashed_at: String,
+    /// False when the file is not in Trash any more — moved or emptied by hand.
+    pub recoverable: bool,
+}
+
+pub fn list_trashed(
+    conn: &Connection,
+    user_id: &str,
+    vault_root: &Path,
+) -> Result<Vec<TrashedDocument>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT d.id, d.title, p.display_name, d.doc_date, d.rel_path, d.trashed_at
+               FROM documents d JOIN patients p ON p.id = d.patient_id
+              WHERE d.owner_user_id = ?1 AND d.trashed_at IS NOT NULL
+              ORDER BY d.trashed_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let rows = stmt
+        .query_map(params![user_id], |r| {
+            let rel_path: String = r.get(4)?;
+            Ok(TrashedDocument {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                patient: r.get(2)?,
+                doc_date: r.get(3)?,
+                recoverable: vault_root
+                    .join("Trash")
+                    .join(rel_path.replace('\\', "/"))
+                    .exists(),
+                rel_path,
+                trashed_at: r.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+/// Put a trashed document back where it was.
+///
+/// The exact reverse of `trash`, and journalled the same way. Trash keeps the
+/// vault-relative shape of the path, so a restore knows the year folder and the
+/// patient folder without having to guess or re-derive them — which matters,
+/// because the patient may have been renamed since.
+pub fn restore(
+    conn: &Connection,
+    user_id: &str,
+    vault_root: &Path,
+    document_id: &str,
+) -> Result<(), String> {
+    let rel_path: String = conn
+        .query_row(
+            "SELECT rel_path FROM documents
+             WHERE id = ?1 AND owner_user_id = ?2 AND trashed_at IS NOT NULL",
+            params![document_id, user_id],
+            |r| r.get(0),
+        )
+        .map_err(|_| "That document is not in the Trash.".to_string())?;
+
+    let from = vault_root.join("Trash").join(rel_path.replace('\\', "/"));
+    let to = vault_root.join(rel_path.replace('\\', "/"));
+
+    if to.exists() {
+        return Err(format!(
+            "Something is already at {rel_path}. Move it aside before restoring this one."
+        ));
+    }
+
+    if from.exists() {
+        let journal_id = journal_intent(conn, "move", &from, &to)?;
+        move_file(&from, &to)?;
+        journal_done(conn, &journal_id)?;
+    } else {
+        // The row can still come back — the reconciler is what finds a file that
+        // was moved by hand — but the user must not be told the file returned.
+        return Err(format!(
+            "The file is no longer in the Trash folder. Put it back at Trash\\{rel_path}, \
+             or use Rescan vault if you moved it somewhere else."
+        ));
+    }
+
+    conn.execute(
+        "UPDATE documents SET trashed_at = NULL, updated_at = datetime('now') WHERE id = ?1",
+        params![document_id],
+    )
+    .map_err(|e| format!("cannot restore the document: {e}"))?;
+
+    let _ = crate::search::index_document(conn, document_id);
+    let _ = crate::backup::write_sidecar(conn, vault_root, document_id);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -884,6 +987,90 @@ mod tests {
         fn exists(&self, rel: &str) -> bool {
             self.vault().join(rel.replace('\\', "/")).exists()
         }
+    }
+
+    #[test]
+    fn a_trashed_document_comes_back_where_it_was() {
+        let f = Fx::new("restore");
+        let doc = f.commit(&f.stage("jpg", b"the scan"), "2025-03-14", "USG of Thyroid").unwrap();
+        let original = f.rel_path(&doc.id);
+
+        trash(&f.conn, &f.user, &f.vault(), &doc.id).unwrap();
+        assert!(!f.exists(&original), "trashing moved it out");
+
+        let waiting = list_trashed(&f.conn, &f.user, &f.vault()).unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert!(waiting[0].recoverable, "the file is sitting in Trash");
+
+        restore(&f.conn, &f.user, &f.vault(), &doc.id).unwrap();
+
+        assert!(f.exists(&original), "and it is back at the same path");
+        assert_eq!(
+            std::fs::read(f.vault().join(original.replace('\\', "/"))).unwrap(),
+            b"the scan",
+            "byte for byte",
+        );
+        assert!(
+            list_trashed(&f.conn, &f.user, &f.vault()).unwrap().is_empty(),
+            "and no longer counted as deleted",
+        );
+    }
+
+    #[test]
+    fn a_restored_document_is_searchable_again() {
+        let f = Fx::new("restoresearch");
+        let doc = f.commit(&f.stage("jpg", b"x"), "2025-03-14", "Lipid Profile").unwrap();
+        trash(&f.conn, &f.user, &f.vault(), &doc.id).unwrap();
+        assert!(crate::search::search(&f.conn, &f.user, "Lipid", 20).unwrap().is_empty());
+
+        restore(&f.conn, &f.user, &f.vault(), &doc.id).unwrap();
+        let hits = crate::search::search(&f.conn, &f.user, "Lipid", 20).unwrap();
+        assert!(hits.iter().any(|h| h.document_id == doc.id), "it must be findable again");
+    }
+
+    #[test]
+    fn restoring_refuses_to_overwrite_something_already_there() {
+        let f = Fx::new("restoreclash");
+        let doc = f.commit(&f.stage("jpg", b"original"), "2025-03-14", "CBC").unwrap();
+        let rel = f.rel_path(&doc.id);
+        trash(&f.conn, &f.user, &f.vault(), &doc.id).unwrap();
+
+        // Something else has taken the name in the meantime.
+        let occupied = f.vault().join(rel.replace('\\', "/"));
+        std::fs::create_dir_all(occupied.parent().unwrap()).unwrap();
+        std::fs::write(&occupied, b"a different file").unwrap();
+
+        let err = restore(&f.conn, &f.user, &f.vault(), &doc.id).unwrap_err();
+        assert!(err.contains("already at"), "{err}");
+        assert_eq!(
+            std::fs::read(&occupied).unwrap(),
+            b"a different file",
+            "the file in the way must be left alone",
+        );
+    }
+
+    #[test]
+    fn restoring_a_file_that_left_the_trash_says_where_to_put_it() {
+        let f = Fx::new("restoregone");
+        let doc = f.commit(&f.stage("jpg", b"x"), "2025-03-14", "CBC").unwrap();
+        let rel = f.rel_path(&doc.id);
+        trash(&f.conn, &f.user, &f.vault(), &doc.id).unwrap();
+        std::fs::remove_file(f.vault().join("Trash").join(rel.replace('\\', "/"))).unwrap();
+
+        let listed = list_trashed(&f.conn, &f.user, &f.vault()).unwrap();
+        assert!(!listed[0].recoverable, "the list must not promise what it cannot do");
+
+        let err = restore(&f.conn, &f.user, &f.vault(), &doc.id).unwrap_err();
+        assert!(err.contains("Rescan vault"), "{err}");
+    }
+
+    #[test]
+    fn restoring_something_that_was_never_trashed_is_refused() {
+        let f = Fx::new("restorelive");
+        let doc = f.commit(&f.stage("jpg", b"x"), "2025-03-14", "CBC").unwrap();
+        assert!(restore(&f.conn, &f.user, &f.vault(), &doc.id)
+            .unwrap_err()
+            .contains("not in the Trash"));
     }
 
     #[test]

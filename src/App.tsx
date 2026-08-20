@@ -15,6 +15,7 @@ import { LockedRow } from './components/LockedRow.tsx';
 import { PatientsPanel } from './components/PatientsPanel.tsx';
 import { ReviewRow, type RowHandle } from './components/ReviewRow.tsx';
 import { Thumb } from './components/Thumb.tsx';
+import { TrashPanel } from './components/TrashPanel.tsx';
 import { VaultTools } from './components/VaultTools.tsx';
 import { fileEach, summarize } from './lib/bulk.ts';
 import { formatDmy } from './lib/extract/dates.ts';
@@ -473,6 +474,7 @@ export default function App() {
             <LockSettings state={lock} onChanged={refreshLock} />
             <VaultTools onRepaired={refresh} />
             <DrivePanel onRestored={refresh} />
+            <TrashPanel onRestored={refresh} />
             {patients.length > 0 && <PatientsPanel patients={patients} onChanged={refresh} />}
             <div className="border-b border-slate-200 px-6 py-3 dark:border-slate-800">
               <CategoryManager categories={categories} onChanged={refresh} />
