@@ -3,9 +3,11 @@ import { useEffect, useState } from 'react';
 import { Spinner } from './Capture.tsx';
 import {
   backupToDrive,
+  cancelGoogleSignin,
   connectGoogle,
   disconnectGoogle,
   driveStatus,
+  finishGoogleSignin,
   restoreFromDrive,
   setGoogleClient,
   type DriveStatus,
@@ -27,9 +29,20 @@ export function Backup({ onError }: { onError: (e: string) => void }) {
   const [setup, setSetup] = useState(false);
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
+  const [pasted, setPasted] = useState('');
 
   const refresh = () => driveStatus().then(setStatus, (e: unknown) => onError(String(e)));
   useEffect(() => void refresh(), []);
+
+  // Coming back from the browser is the moment the answer might have landed, and
+  // it is also the moment nothing on this screen knows that. The listener may
+  // have finished the sign-in while the app was away — or been stopped before it
+  // could, which is what the paste box is for.
+  useEffect(() => {
+    const look = () => document.visibilityState === 'visible' && void refresh();
+    document.addEventListener('visibilitychange', look);
+    return () => document.removeEventListener('visibilitychange', look);
+  }, []);
 
   async function run(what: string, fn: () => Promise<unknown>) {
     setBusy(what);
@@ -68,6 +81,68 @@ export function Backup({ onError }: { onError: (e: string) => void }) {
               Disconnect
             </button>
           </>
+        ) : account?.pending ? (
+          <>
+            <p className="text-base font-medium">Finish in the browser</p>
+            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+              Choose your account and allow access. Come back here when you are done.
+            </p>
+
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={() => void run('check', async () => {})}
+              className="mt-3 h-12 w-full rounded-xl bg-sky-600 text-base font-medium text-white disabled:bg-slate-300 dark:disabled:bg-slate-700"
+            >
+              {busy === 'check' ? (
+                <span className="flex items-center justify-center gap-2">
+                  <Spinner small />
+                  Checking…
+                </span>
+              ) : (
+                'I have finished — check'
+              )}
+            </button>
+
+            <div className="mt-4 rounded-xl bg-amber-50 p-3 dark:bg-amber-950/50">
+              <p className="text-sm font-medium text-amber-900 dark:text-amber-200">
+                Did the browser show an error page?
+              </p>
+              <p className="mt-1 text-xs text-amber-800 dark:text-amber-300">
+                It still worked. Google put the answer in the address bar before the page failed —
+                copy the whole address and paste it here.
+              </p>
+              <input
+                className={`${field} mt-2 font-mono text-xs`}
+                placeholder="http://127.0.0.1:…"
+                value={pasted}
+                onChange={(e) => setPasted(e.target.value)}
+                aria-label="The address from the browser"
+              />
+              <button
+                type="button"
+                disabled={!pasted.trim() || busy !== null}
+                onClick={() =>
+                  void run('paste', async () => {
+                    await finishGoogleSignin(pasted.trim());
+                    setPasted('');
+                  })
+                }
+                className="mt-2 h-12 w-full rounded-xl bg-amber-600 text-base font-medium text-white disabled:bg-slate-300 dark:disabled:bg-slate-700"
+              >
+                {busy === 'paste' ? 'Finishing…' : 'Finish sign-in'}
+              </button>
+            </div>
+
+            <button
+              type="button"
+              disabled={busy !== null}
+              onClick={() => void run('cancel', cancelGoogleSignin)}
+              className="mt-2 h-11 w-full rounded-xl text-sm text-slate-500 dark:text-slate-400"
+            >
+              Start over
+            </button>
+          </>
         ) : account?.configured ? (
           <>
             <p className="text-base font-medium">Connect Google Drive</p>
@@ -84,7 +159,7 @@ export function Backup({ onError }: { onError: (e: string) => void }) {
               {busy === 'in' ? (
                 <span className="flex items-center justify-center gap-2">
                   <Spinner small />
-                  Waiting for Google — finish in the browser
+                  Opening Google…
                 </span>
               ) : (
                 'Choose a Google account'

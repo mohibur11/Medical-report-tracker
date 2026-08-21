@@ -588,7 +588,72 @@ fn set_google_client(
     Ok(google::account(&conn))
 }
 
-/// Sign in to Google. Opens the browser and waits for the answer.
+/// Sign in to Google.
+///
+/// Two different shapes, for two different platforms. On a desktop the browser is
+/// a window this app outlives, so the flow is one call that blocks until Google
+/// answers. On a phone the browser replaces this app on screen and Android may
+/// stop it while it is away — so the phone starts the flow, records what it needs
+/// to finish it, and returns. Whoever gets the answer first completes it: the
+/// listener if it survived, or `finish_google_signin` with the address pasted out
+/// of the browser if it did not.
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn connect_google(
+    app: AppHandle,
+    state: State<'_, Db>,
+) -> Result<google::Account, String> {
+    let port = ocr::start_loopback()?;
+    let url = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        google::begin(&conn, &format!("http://127.0.0.1:{port}"))?
+    };
+
+    ocr::open_in_app(&url)?;
+
+    // Best effort. If the app is still running when the browser comes back, this
+    // finishes the sign-in with nobody having to do anything; if Android stopped
+    // it in the meantime, the pending flow is still in the database and the
+    // screen offers the way to finish it by hand.
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Ok(answer) = ocr::await_redirect() else { return };
+        let db = handle.state::<Db>();
+        let Ok(conn) = db.0.lock() else { return };
+        if let Ok(tokens) = google::finish(&conn, &answer) {
+            let _ = google::store(&conn, tokens);
+        }
+    });
+
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    Ok(google::account(&conn))
+}
+
+/// Finish a sign-in from the address the browser ended up on.
+///
+/// The redirect goes to a port on this phone, and every way that can fail — the
+/// app stopped, the port closed, the network switched underneath Chrome — fails
+/// *after* Google has already handed over the code. It is sitting in the address
+/// bar of the error page. This takes it from there.
+#[tauri::command]
+fn finish_google_signin(
+    state: State<'_, Db>,
+    answer: String,
+) -> Result<google::Account, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let tokens = google::finish(&conn, answer.trim())?;
+    google::store(&conn, tokens)
+}
+
+/// Abandon a sign-in that was started and never came back.
+#[tauri::command]
+fn cancel_google_signin(state: State<'_, Db>) -> Result<google::Account, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    google::cancel(&conn);
+    Ok(google::account(&conn))
+}
+
+#[cfg(not(target_os = "android"))]
 #[tauri::command]
 async fn connect_google(
     app: AppHandle,
@@ -597,8 +662,6 @@ async fn connect_google(
     // The database lock is taken twice, briefly, and never while the browser is
     // open: signing in takes as long as the person takes, and holding it would
     // freeze every other part of the app until they finished.
-    // The same desktop OAuth client on both platforms. Google accepts a loopback
-    // redirect from one anywhere, including from a browser on a phone.
     let (client_id, client_secret) = {
         let conn = state.0.lock().map_err(|e| e.to_string())?;
         google::client_credentials(&conn)?
@@ -609,23 +672,11 @@ async fn connect_google(
     let opener = app.clone();
     let tokens = tauri::async_runtime::spawn_blocking(move || {
         google::run_flow(&client_id, &client_secret, |url| {
-            // On a phone the page opens inside this app. Sending it to the system
-            // browser backgrounds the app, Android freezes the process, and the
-            // listener waiting for Google's redirect stops accepting.
-            #[cfg(target_os = "android")]
-            {
-                let _ = &opener;
-                return ocr::open_in_app(url);
-            }
-
-            #[cfg(not(target_os = "android"))]
-            {
-                use tauri_plugin_opener::OpenerExt;
-                opener
-                    .opener()
-                    .open_url(url, None::<&str>)
-                    .map_err(|e| format!("cannot open the browser: {e}"))
-            }
+            use tauri_plugin_opener::OpenerExt;
+            opener
+                .opener()
+                .open_url(url, None::<&str>)
+                .map_err(|e| format!("cannot open the browser: {e}"))
         })
     })
     .await
@@ -1140,6 +1191,8 @@ pub fn run() {
             drive_status,
             set_google_client,
             connect_google,
+            finish_google_signin,
+            cancel_google_signin,
             disconnect_google,
             set_drive_folder,
             backup_to_drive,

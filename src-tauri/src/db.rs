@@ -58,6 +58,13 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<(), Stri
     Ok(())
 }
 
+/// Forget one stored setting. Missing is not an error — the caller wants it gone.
+pub fn clear_setting(conn: &Connection, key: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM app_setting WHERE key = ?1", rusqlite::params![key])
+        .map_err(|e| format!("cannot clear setting: {e}"))?;
+    Ok(())
+}
+
 /// How the database was obtained, so the window can say so.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]

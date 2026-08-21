@@ -273,6 +273,8 @@ export interface GoogleAccount {
   connected: boolean;
   /** False until an OAuth client ID has been configured. */
   configured: boolean;
+  /** A sign-in was started and Google's answer has not arrived yet. */
+  pending: boolean;
 }
 
 export interface DriveStatus {
@@ -310,8 +312,30 @@ export const setGoogleClient = (
   clientSecret: string,
 ): Promise<GoogleAccount> => invoke('set_google_client', { clientId, clientSecret });
 
-/** Opens the browser and waits — up to three minutes — for the account choice. */
+/**
+ * Start signing in.
+ *
+ * On a desktop this waits — up to three minutes — for the account choice. On a
+ * phone it returns as soon as the browser is open, because the browser replaces
+ * this app on screen and Android may stop it while it is away: nothing that has
+ * to survive the trip can be held in a promise. The answer is collected by
+ * whoever gets it, and `account.pending` says one is outstanding.
+ */
 export const connectGoogle = (): Promise<GoogleAccount> => invoke('connect_google');
+
+/**
+ * Finish a sign-in from the address the browser ended up on.
+ *
+ * Every way the redirect can fail does so *after* Google has handed the code
+ * over — it is sitting in the address bar of the error page. Accepts the whole
+ * address or just its query.
+ */
+export const finishGoogleSignin = (answer: string): Promise<GoogleAccount> =>
+  invoke('finish_google_signin', { answer });
+
+/** Abandon a sign-in that was started and never came back. */
+export const cancelGoogleSignin = (): Promise<GoogleAccount> =>
+  invoke('cancel_google_signin');
 
 export const disconnectGoogle = (): Promise<GoogleAccount> => invoke('disconnect_google');
 

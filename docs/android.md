@@ -105,27 +105,36 @@ refuses it. Expect a Play Protect warning about an unknown developer.
   does, so every call failed with "error sending request" — including the token
   exchange, long after the sign-in itself had succeeded. The build uses
   `rustls-tls-webpki-roots` instead.
-- **The sign-in listener is Kotlin, and that is deliberate.** The phone uses the
-  same **desktop** OAuth client as Windows, the same PKCE, and the same
-  `http://127.0.0.1:PORT` redirect. Only the socket is different: `startLoopback`
-  and `awaitRedirect` in `OcrPlugin.kt` open it and accept on their own thread.
-  An identical listener written in Rust bound its port and then never accepted
-  the connection — the browser sat on the backlog until it timed out, and the
-  sign-in hung, four times, through three wrong explanations. Whatever the cause,
-  the platform schedules its own threads reliably.
+- **The sign-in cannot depend on this app still running.** Five attempts failed
+  on that assumption, each with a different explanation and the same symptom: the
+  browser holding a perfectly good authorization code and nothing to give it to.
+  `ERR_NETWORK_CHANGED` against `127.0.0.1:PORT` is the last of them. The app
+  leaves the screen when the browser opens, and Android may stop it, drop its web
+  view, or kill the thread that was waiting — so anything held in memory across
+  that trip is gone.
+
+  What survives is the database. `google::begin` writes the verifier, the state
+  and the redirect it promised Google, and returns; `google::finish` collects the
+  answer later. Whoever gets it first completes the sign-in.
+
+- **The answer is in the address bar, even on the error page.** Every way this
+  can fail, fails *after* Google has handed over the code. Copying the address
+  out of the browser and pasting it into the Backup screen finishes the sign-in
+  with no socket involved at all. That is the path that always works, and it is
+  offered on screen the moment a sign-in is outstanding.
+
+- **The Kotlin listener is now best effort.** `startLoopback` and `awaitRedirect`
+  in `OcrPlugin.kt` still open a socket and accept on their own thread, and when
+  the app survives the trip they finish the sign-in with nobody having to do
+  anything. When they do not, nothing is lost.
+
 - **Do not use an Android OAuth client here.** One was registered and tried, with
   a `com.googleusercontent.apps.*` redirect scheme claimed in the manifest.
   Google refuses an Android client at the browser authorization endpoint
   outright: `Error 400: invalid_request`, before the consent screen appears.
   Android client IDs exist for the native sign-in libraries, not for this flow.
-  The client can be deleted from the Cloud console.
-- **The sign-in must still open inside the app.** Handing the URL to the system
-  browser sends this app to the background and Android freezes cached processes.
-  A Custom Tab runs in this app's own task, so the process stays awake and the
-  listener keeps accepting.
-- **Whether it now completes on a device is untested.** It compiles, packages and
-  is reachable in principle; nobody has yet watched a phone come back from
-  Google with a code.
+  The phone uses the same **desktop** client as Windows. That client can have its
+  Android counterpart deleted from the Cloud console.
 - **The refresh token is not encrypted on Android.** On Windows DPAPI protects one
   row in a database that anyone with the user's files can read. Android does not
   have that problem — the database is in internal app storage, which no other app

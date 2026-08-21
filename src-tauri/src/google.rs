@@ -36,6 +36,17 @@ pub const CLIENT_SECRET: &str = "google_client_secret";
 const REFRESH_TOKEN: &str = "google_refresh_token";
 const ACCOUNT_EMAIL: &str = "google_account_email";
 
+/// A sign-in that has been started and not yet answered.
+///
+/// Kept in the database rather than in a variable, because on a phone the flow
+/// outlives the thing that started it: opening the browser sends this app to the
+/// background, and Android is free to freeze it, drop the web view, or stop the
+/// thread that was waiting. Anything held in memory is gone by the time the
+/// answer arrives. These three survive it.
+const PENDING_VERIFIER: &str = "google_pending_verifier";
+const PENDING_STATE: &str = "google_pending_state";
+const PENDING_REDIRECT: &str = "google_pending_redirect";
+
 /// How long the browser half of the flow may take before it is given up on.
 const CONSENT_TIMEOUT: Duration = Duration::from_secs(180);
 
@@ -46,6 +57,9 @@ pub struct Account {
     pub connected: bool,
     /// False until an OAuth client id has been configured.
     pub configured: bool,
+    /// A sign-in was started and Google's answer has not arrived. The screen uses
+    /// this to offer the way to finish it by hand.
+    pub pending: bool,
 }
 
 pub fn account(conn: &Connection) -> Account {
@@ -55,6 +69,7 @@ pub fn account(conn: &Connection) -> Account {
         email: db::setting(conn, ACCOUNT_EMAIL),
         connected: db::setting(conn, REFRESH_TOKEN).is_some(),
         configured,
+        pending: db::setting(conn, PENDING_VERIFIER).is_some(),
     }
 }
 
@@ -83,9 +98,10 @@ pub fn disconnect(conn: &Connection) -> Result<(), String> {
             .send();
     }
     for key in [REFRESH_TOKEN, ACCOUNT_EMAIL] {
-        conn.execute("DELETE FROM app_setting WHERE key = ?1", rusqlite::params![key])
-            .map_err(|e| format!("cannot forget the account: {e}"))?;
+        db::clear_setting(conn, key)?;
     }
+    // A half-finished sign-in belongs to the account being forgotten.
+    cancel(conn);
     // The uploaded-file map belongs to the account that owns those files.
     conn.execute("DELETE FROM drive_file", [])
         .map_err(|e| format!("cannot clear the upload record: {e}"))?;
@@ -161,6 +177,102 @@ pub struct Tokens {
     pub email: Option<String>,
 }
 
+/// Start a sign-in and return the URL to open.
+///
+/// Returns immediately. What it leaves behind — the verifier, the state, the
+/// redirect it promised Google — is what lets the answer be collected later by
+/// whoever gets it first: the listener if it survived, or the person pasting the
+/// address out of the browser if it did not.
+pub fn begin(conn: &Connection, redirect: &str) -> Result<String, String> {
+    let (client_id, _) = client_credentials(conn)?;
+    let (verifier, challenge) = pkce_pair();
+    let state = base64_url_nopad(&{
+        use rand_core::RngCore;
+        let mut b = [0u8; 16];
+        rand_core::OsRng.fill_bytes(&mut b);
+        b
+    });
+
+    db::set_setting(conn, PENDING_VERIFIER, &verifier)?;
+    db::set_setting(conn, PENDING_STATE, &state)?;
+    db::set_setting(conn, PENDING_REDIRECT, redirect)?;
+
+    Ok(format!(
+        "{AUTH_ENDPOINT}?client_id={}&redirect_uri={}&response_type=code&scope={}&code_challenge={}&code_challenge_method=S256&state={}&access_type=offline&prompt=consent",
+        percent_encode(&client_id),
+        percent_encode(redirect),
+        percent_encode(SCOPE),
+        percent_encode(&challenge),
+        percent_encode(&state),
+    ))
+}
+
+/// Forget a sign-in that was started and never finished.
+pub fn cancel(conn: &Connection) {
+    for key in [PENDING_VERIFIER, PENDING_STATE, PENDING_REDIRECT] {
+        let _ = db::clear_setting(conn, key);
+    }
+}
+
+/// Read the answer, check it belongs to the sign-in that was started, and take
+/// the pending flow with it.
+///
+/// `answer` is whatever the browser ended up holding: the whole address, or just
+/// its query. The address bar keeps it even when the page itself failed to load,
+/// which is the point — a redirect to a port nobody is listening on any more
+/// still shows the code, and it is still good.
+fn claim(conn: &Connection, answer: &str) -> Result<(String, String, String), String> {
+    let verifier = db::setting(conn, PENDING_VERIFIER)
+        .ok_or("No sign-in is waiting to be finished. Start one first.")?;
+    let expected = db::setting(conn, PENDING_STATE).unwrap_or_default();
+    let redirect = db::setting(conn, PENDING_REDIRECT).unwrap_or_default();
+
+    let query = answer.split_once('?').map(|(_, q)| q).unwrap_or(answer).trim();
+    let code = code_from_query(query, &expected)
+        .ok_or("That address carries no sign-in answer. Copy the whole address from the browser.")??;
+
+    cancel(conn);
+    Ok((code, verifier, redirect))
+}
+
+/// Exchange the answer for tokens.
+pub fn finish(conn: &Connection, answer: &str) -> Result<Tokens, String> {
+    let (client_id, client_secret) = client_credentials(conn)?;
+    let (code, verifier, redirect) = claim(conn, answer)?;
+
+    let response = reqwest::blocking::Client::new()
+        .post(TOKEN_ENDPOINT)
+        .form(&[
+            ("code", code.as_str()),
+            ("client_id", client_id.as_str()),
+            ("client_secret", client_secret.as_str()),
+            ("redirect_uri", redirect.as_str()),
+            ("grant_type", "authorization_code"),
+            ("code_verifier", verifier.as_str()),
+        ])
+        .send()
+        .map_err(|e| format!("cannot reach Google: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(explain_token_error(&response.text().unwrap_or_default()));
+    }
+
+    let token: TokenResponse = response
+        .json()
+        .map_err(|e| format!("Google's reply could not be read: {e}"))?;
+    let refresh = token
+        .refresh_token
+        .ok_or("Google did not return a refresh token. Remove this app at myaccount.google.com/permissions and try again.")?;
+    let email = fetch_email(&token.access_token);
+
+    Ok(Tokens {
+        refresh,
+        access: token.access_token,
+        expires_in: token.expires_in.unwrap_or(3600),
+        email,
+    })
+}
+
 /// The sign-in itself: open the browser, wait for the answer, exchange it.
 ///
 /// Takes no database handle on purpose. This blocks for as long as the person
@@ -176,10 +288,13 @@ pub fn run_flow(
 ) -> Result<Tokens, String> {
     #[cfg(target_os = "android")]
     {
-        return android_flow(client_id, client_secret, open_url);
+        // The phone does not use this. Its browser leaves the app suspended, so
+        // its sign-in is begin/finish and survives the app being stopped.
+        let _ = (client_id, client_secret, open_url);
+        return Err("Use begin and finish on Android.".into());
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[allow(unreachable_code)]
     {
 
     // Port 0 asks the OS for a free one; Google allows any port on loopback.
@@ -251,82 +366,6 @@ pub fn run_flow(
         email,
     })
     }
-}
-
-/// The phone's sign-in.
-///
-/// Identical to the desktop's in everything Google can see: the same desktop
-/// OAuth client, the same PKCE, the same `http://127.0.0.1:PORT` redirect. Only
-/// the socket differs — it is opened by Kotlin rather than here, because a
-/// listener bound in Rust never accepted the connection the browser made to it,
-/// and the sign-in hung with it.
-///
-/// An Android OAuth client was tried first and is a dead end: Google refuses one
-/// at the browser authorization endpoint outright, with `Error 400:
-/// invalid_request`. Android clients exist for the native sign-in libraries.
-#[cfg(target_os = "android")]
-fn android_flow(
-    client_id: &str,
-    client_secret: &str,
-    open_url: impl FnOnce(&str) -> Result<(), String>,
-) -> Result<Tokens, String> {
-    let port = crate::ocr::start_loopback()?;
-    let redirect = format!("http://127.0.0.1:{port}");
-
-    let (verifier, challenge) = pkce_pair();
-    let state = base64_url_nopad(&{
-        use rand_core::RngCore;
-        let mut b = [0u8; 16];
-        rand_core::OsRng.fill_bytes(&mut b);
-        b
-    });
-
-    let url = format!(
-        "{AUTH_ENDPOINT}?client_id={}&redirect_uri={}&response_type=code&scope={}&code_challenge={}&code_challenge_method=S256&state={}&access_type=offline&prompt=consent",
-        percent_encode(client_id),
-        percent_encode(&redirect),
-        percent_encode(SCOPE),
-        percent_encode(&challenge),
-        percent_encode(&state),
-    );
-
-    open_url(&url)?;
-
-    let query = crate::ocr::await_redirect()?;
-    let code = code_from_query(&query, &state)
-        .ok_or("Google's reply carried no authorization code.")??;
-
-    let response = reqwest::blocking::Client::new()
-        .post(TOKEN_ENDPOINT)
-        .form(&[
-            ("code", code.as_str()),
-            ("client_id", client_id),
-            ("client_secret", client_secret),
-            ("redirect_uri", redirect.as_str()),
-            ("grant_type", "authorization_code"),
-            ("code_verifier", verifier.as_str()),
-        ])
-        .send()
-        .map_err(|e| format!("cannot reach Google: {e}"))?;
-
-    if !response.status().is_success() {
-        return Err(explain_token_error(&response.text().unwrap_or_default()));
-    }
-
-    let token: TokenResponse = response
-        .json()
-        .map_err(|e| format!("Google's reply could not be read: {e}"))?;
-    let refresh = token
-        .refresh_token
-        .ok_or("Google did not return a refresh token. Remove this app at myaccount.google.com/permissions and try again.")?;
-    let email = fetch_email(&token.access_token);
-
-    Ok(Tokens {
-        refresh,
-        access: token.access_token,
-        expires_in: token.expires_in.unwrap_or(3600),
-        email,
-    })
 }
 
 /// Keep what the sign-in returned. Sealed, because the refresh token is standing
@@ -629,6 +668,89 @@ mod tests {
         assert_eq!(percent_encode("http://127.0.0.1:1234"), "http%3A%2F%2F127.0.0.1%3A1234");
         assert_eq!(percent_encode("a b&c=d"), "a%20b%26c%3Dd");
         assert_eq!(percent_encode("-_.~"), "-_.~", "unreserved characters stay as they are");
+    }
+
+    /// A started sign-in, and the state Google would send back with it.
+    fn started(conn: &Connection) -> String {
+        set_client(conn, "x.apps.googleusercontent.com", "s").unwrap();
+        begin(conn, "http://127.0.0.1:34813").unwrap();
+        db::setting(conn, PENDING_STATE).unwrap()
+    }
+
+    #[test]
+    fn a_started_sign_in_outlives_whatever_started_it() {
+        // The phone's browser replaces this app on screen and Android is free to
+        // stop it while it is away. Nothing held in memory survives that.
+        let c = conn();
+        let state = started(&c);
+
+        assert!(account(&c).pending, "the screen must be able to offer a way to finish");
+        assert!(db::setting(&c, PENDING_VERIFIER).is_some());
+        assert_eq!(db::setting(&c, PENDING_REDIRECT).unwrap(), "http://127.0.0.1:34813");
+        assert!(!state.is_empty());
+    }
+
+    #[test]
+    fn the_address_from_a_failed_page_still_finishes_the_sign_in() {
+        // Every way the redirect can fail — the app stopped, the port closed, the
+        // network switched under Chrome — fails after Google has handed the code
+        // over. It is in the address bar of the error page.
+        let c = conn();
+        let state = started(&c);
+
+        let pasted = format!("http://127.0.0.1:34813/?state={state}&code=4%2F0Axyz&scope=drive.file");
+        let (code, verifier, redirect) = claim(&c, &pasted).unwrap();
+
+        assert_eq!(code, "4/0Axyz");
+        assert!(!verifier.is_empty());
+        assert_eq!(redirect, "http://127.0.0.1:34813");
+        assert!(!account(&c).pending, "a claimed sign-in must not be offered twice");
+    }
+
+    #[test]
+    fn a_bare_query_is_accepted_too() {
+        // What the listener hands over, as opposed to what a person pastes.
+        let c = conn();
+        let state = started(&c);
+        let (code, _, _) = claim(&c, &format!("state={state}&code=abc")).unwrap();
+        assert_eq!(code, "abc");
+    }
+
+    #[test]
+    fn an_answer_from_another_sign_in_leaves_this_one_open() {
+        let c = conn();
+        started(&c);
+
+        let err = claim(&c, "http://127.0.0.1:34813/?state=elsewhere&code=abc").unwrap_err();
+        assert!(err.contains("did not match"), "{err}");
+        assert!(
+            account(&c).pending,
+            "refusing one paste must not throw away the sign-in — the right address may follow"
+        );
+    }
+
+    #[test]
+    fn pasting_something_that_is_not_an_answer_says_what_to_do() {
+        let c = conn();
+        started(&c);
+        let err = claim(&c, "https://accounts.google.com/").unwrap_err();
+        assert!(err.contains("Copy the whole address"), "{err}");
+    }
+
+    #[test]
+    fn finishing_without_starting_is_refused() {
+        let c = conn();
+        set_client(&c, "x.apps.googleusercontent.com", "s").unwrap();
+        let err = claim(&c, "http://127.0.0.1:1/?code=abc&state=x").unwrap_err();
+        assert!(err.contains("No sign-in is waiting"), "{err}");
+    }
+
+    #[test]
+    fn disconnecting_abandons_a_half_finished_sign_in() {
+        let c = conn();
+        started(&c);
+        disconnect(&c).unwrap();
+        assert!(!account(&c).pending);
     }
 
     #[test]
