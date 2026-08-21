@@ -216,6 +216,11 @@ fn clear_missing(conn: &Connection, id: &str) -> Result<(), String> {
 }
 
 /// Create a document row for a file that already carries a canonical name.
+///
+/// Two sources, in order: the sidecar written beside the file, which carries what
+/// a filename cannot — the person's name as typed, the notes, the tags — and the
+/// filename itself, which carries date, patient and title and is why a vault
+/// restored with no database at all is still a library.
 fn adopt(
     conn: &Connection,
     user_id: &str,
@@ -223,14 +228,15 @@ fn adopt(
     path: &Path,
     parsed: &naming::ParsedName,
 ) -> Result<String, String> {
-    let patient_id: String = conn
-        .query_row(
-            "SELECT id FROM patients
-             WHERE owner_user_id = ?1 AND upper(folder_slug) = upper(?2) AND archived_at IS NULL",
-            params![user_id, parsed.patient_slug],
-            |r| r.get(0),
-        )
-        .map_err(|_| format!("no patient with folder '{}'", parsed.patient_slug))?;
+    let side = read_sidecar(path);
+
+    // The person as they were written down, or the folder name with its hyphens
+    // turned back into spaces.
+    let display = side
+        .as_ref()
+        .map(|s| s.patient.clone())
+        .unwrap_or_else(|| parsed.patient_slug.replace('-', " "));
+    let patient_id = patient_for(conn, user_id, &parsed.patient_slug, &display)?;
 
     let rel = path
         .strip_prefix(vault_root)
@@ -244,21 +250,105 @@ fn adopt(
         "png" => "png",
         _ => "jpeg",
     };
+
     // The title is a slug on disk; restore the spaces a person would have typed.
-    let title = parsed.title.replace('-', " ");
+    let title = side
+        .as_ref()
+        .map(|s| s.title.clone())
+        .unwrap_or_else(|| parsed.title.replace('-', " "));
+    let doc_type = side.as_ref().map_or("report", |s| s.doc_type.as_str()).to_string();
+    let doc_date = side.as_ref().map_or(parsed.doc_date.as_str(), |s| s.doc_date.as_str());
+    let notes = side.as_ref().and_then(|s| s.notes.clone());
     let id = ulid::Ulid::new().to_string();
 
     conn.execute(
         "INSERT INTO documents
            (id, owner_user_id, patient_id, doc_date, date_source, title, doc_type, page_count,
-            rel_path, sha256, byte_size, file_kind, created_at, updated_at)
-         VALUES (?1,?2,?3,?4,'manual',?5,'report',1,?6,?7,?8,?9, datetime('now'), datetime('now'))",
-        params![id, user_id, patient_id, parsed.doc_date, title, rel, hash, size, kind],
+            rel_path, sha256, byte_size, file_kind, notes, created_at, updated_at)
+         VALUES (?1,?2,?3,?4,'manual',?5,?6,1,?7,?8,?9,?10,?11, datetime('now'), datetime('now'))",
+        params![id, user_id, patient_id, doc_date, title, doc_type, rel, hash, size, kind, notes],
     )
     .map_err(|e| format!("cannot adopt: {e}"))?;
 
+    if let Some(side) = &side {
+        restore_tags(conn, user_id, &id, &side.categories);
+    }
+
     let _ = crate::search::index_document(conn, &id);
     Ok(title)
+}
+
+/// What was written beside this file when it was filed, if it is still there.
+fn read_sidecar(path: &Path) -> Option<crate::backup::Sidecar> {
+    let mut name = path.file_name()?.to_string_lossy().to_string();
+    name.push_str(crate::backup::SIDECAR_SUFFIX);
+    let raw = std::fs::read_to_string(path.with_file_name(name)).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+/// The patient this folder belongs to, created if this is the first sight of them.
+///
+/// A restored phone has the files and no database, so refusing to adopt anything
+/// until somebody re-types the names by hand would make the backup useless
+/// exactly when it is needed. The folder is the record of who: it was written by
+/// this app, from a name a person typed.
+fn patient_for(
+    conn: &Connection,
+    user_id: &str,
+    slug: &str,
+    display_name: &str,
+) -> Result<String, String> {
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM patients
+             WHERE owner_user_id = ?1 AND upper(folder_slug) = upper(?2) AND archived_at IS NULL",
+            params![user_id, slug],
+            |r| r.get(0),
+        )
+        .ok();
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+
+    let created = crate::patients::create(conn, user_id, display_name, None)
+        .map_err(|e| format!("cannot restore the person '{display_name}': {e}"))?;
+
+    // The folder on disk is the authority. A display name that slugifies to
+    // something else would strand every other file in the same folder.
+    conn.execute(
+        "UPDATE patients SET folder_slug = ?2 WHERE id = ?1",
+        params![created.id, slug],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(created.id)
+}
+
+/// Put back the tags the sidecar recorded, creating any that no longer exist.
+fn restore_tags(conn: &Connection, user_id: &str, document_id: &str, names: &[String]) {
+    for name in names {
+        let id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM categories WHERE owner_user_id = ?1 AND upper(name) = upper(?2)",
+                params![user_id, name],
+                |r| r.get(0),
+            )
+            .ok();
+
+        let id = match id {
+            Some(id) => id,
+            None => match crate::categories::create(conn, user_id, name, None) {
+                Ok(c) => c.id,
+                Err(_) => continue,
+            },
+        };
+
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO document_category (document_id, category_id, created_at)
+             VALUES (?1, ?2, datetime('now'))",
+            params![document_id, id],
+        );
+    }
 }
 
 #[cfg(test)]
@@ -422,16 +512,69 @@ mod tests {
     }
 
     #[test]
-    fn adoption_is_refused_when_no_patient_owns_the_folder() {
+    fn a_folder_for_a_person_nobody_has_heard_of_brings_them_back() {
+        // What a restore looks like: files on disk, and a database that has never
+        // seen any of them. Refusing until somebody re-types the names by hand
+        // would make the backup useless at the one moment it is needed.
         let mut f = Fx::new();
         let dir = f.vault().join("Someone-Else").join("2026");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("2026-03-14_Someone-Else_CBC.jpg"), b"x").unwrap();
+        std::fs::write(dir.join("2026-04-02_Someone-Else_ESR.jpg"), b"y").unwrap();
 
         let r = f.run();
-        assert!(r.adopted.is_empty());
-        assert_eq!(r.unknown.len(), 1);
-        assert!(r.unknown[0].contains("no patient with folder"));
+        assert_eq!(r.adopted.len(), 2, "{:?}", r.unknown);
+        assert!(r.unknown.is_empty());
+
+        let created: i64 = f
+            .conn
+            .query_row(
+                "SELECT count(*) FROM patients WHERE owner_user_id = ?1 AND folder_slug = 'Someone-Else'",
+                params![f.user],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(created, 1, "both files belong to one person, not one each");
+    }
+
+    #[test]
+    fn a_sidecar_restores_what_the_filename_could_not_carry() {
+        let mut f = Fx::new();
+        let dir = f.vault().join("Rahim-Uddin").join("2026");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("2026-03-14_Rahim-Uddin_Thyroid-Profile.jpg"), b"x").unwrap();
+        std::fs::write(
+            dir.join(format!("2026-03-14_Rahim-Uddin_Thyroid-Profile.jpg{}", crate::backup::SIDECAR_SUFFIX)),
+            br#"{"schema":1,"documentId":"old","patient":"Rahim Uddin",
+                 "docDate":"2026-03-14","title":"Thyroid Profile (TSH, FT4)",
+                 "docType":"report","categories":["Thyroid"],"notes":"fasting",
+                 "sha256":"whatever"}"#,
+        )
+        .unwrap();
+
+        let r = f.run();
+        assert_eq!(r.adopted.len(), 1, "{:?}", r.unknown);
+
+        let (title, notes, patient): (String, Option<String>, String) = f
+            .conn
+            .query_row(
+                "SELECT d.title, d.notes, p.display_name FROM documents d
+                 JOIN patients p ON p.id = d.patient_id",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        // The slug would have given "Thyroid Profile (TSH, FT4)" back as
+        // "Thyroid-Profile" — punctuation and all, gone.
+        assert_eq!(title, "Thyroid Profile (TSH, FT4)");
+        assert_eq!(notes.as_deref(), Some("fasting"));
+        assert_eq!(patient, "Rahim Uddin");
+
+        let tags: i64 = f
+            .conn
+            .query_row("SELECT count(*) FROM document_category", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(tags, 1, "a tag recorded at backup time comes back with it");
     }
 
     #[test]

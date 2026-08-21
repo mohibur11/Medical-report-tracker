@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 
 import { stagedPreview } from '../lib/ipc.ts';
 
@@ -12,6 +13,11 @@ import { stagedPreview } from '../lib/ipc.ts';
  * Zoom is done with a transform rather than by loading anything larger. The
  * picture is already in memory, and re-fetching at a higher resolution would put
  * a wait exactly where somebody is trying to check something quickly.
+ *
+ * Three separate ways out, because a full-screen overlay somebody cannot dismiss
+ * is worse than no preview at all: the close button, the phone's back gesture,
+ * and Escape. The overlay is also rendered into `document.body` rather than where
+ * it is written, so nothing it happens to sit inside can clip it.
  */
 export function ImageViewer({ ingestId, onClose }: { ingestId: string; onClose: () => void }) {
   const [src, setSrc] = useState<string | null>(null);
@@ -39,12 +45,24 @@ export function ImageViewer({ ingestId, onClose }: { ingestId: string; onClose: 
     };
   }, [ingestId]);
 
-  // Escape closes it, because a full-screen overlay with no way out by keyboard
-  // is a trap on a desktop.
+  // Escape on a desktop, and the phone's back gesture — which otherwise leaves
+  // the app entirely, which is a startling thing to happen when somebody meant
+  // to shut a picture.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    const onPop = () => onClose();
+
+    window.history.pushState({ viewer: true }, '');
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener('popstate', onPop);
+
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('popstate', onPop);
+      // Take our own history entry back out, unless the back gesture is what
+      // removed it — going back twice would leave the screen behind as well.
+      if (window.history.state?.viewer) window.history.back();
+    };
   }, [onClose]);
 
   const clamp = (value: number) => Math.min(6, Math.max(1, value));
@@ -99,29 +117,37 @@ export function ImageViewer({ ingestId, onClose }: { ingestId: string; onClose: 
     });
   }
 
-  return (
+  return createPortal(
     <div
-      className="fixed inset-0 z-50 flex flex-col bg-black/95"
+      className="fixed inset-0 z-[999] flex flex-col bg-black"
       role="dialog"
+      aria-modal="true"
       aria-label="Report preview"
     >
       <div
-        className="flex shrink-0 items-center justify-between px-3 py-2"
+        className="flex shrink-0 items-center justify-between gap-2 px-3 py-2"
         style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 0.5rem)' }}
       >
+        {/* Deliberately the biggest thing on the bar. Somebody who cannot find
+            this is stuck inside a picture with their whole library behind it. */}
         <button
           type="button"
           onClick={onClose}
-          className="h-11 rounded-lg px-4 text-sm font-medium text-white/90 active:bg-white/10"
+          aria-label="Close the preview"
+          className="flex h-12 items-center gap-2 rounded-xl bg-white/15 px-4 text-base font-medium text-white active:bg-white/25"
         >
-          ✕ Close
+          <span aria-hidden className="text-xl leading-none">
+            ✕
+          </span>
+          Close
         </button>
+
         <div className="flex items-center gap-1">
           <button
             type="button"
             onClick={() => zoomBy(1 / 1.5)}
             aria-label="Zoom out"
-            className="size-11 rounded-lg text-xl text-white/90 active:bg-white/10"
+            className="size-12 rounded-xl bg-white/10 text-2xl text-white active:bg-white/25"
           >
             −
           </button>
@@ -130,7 +156,7 @@ export function ImageViewer({ ingestId, onClose }: { ingestId: string; onClose: 
             type="button"
             onClick={() => zoomBy(1.5)}
             aria-label="Zoom in"
-            className="size-11 rounded-lg text-xl text-white/90 active:bg-white/10"
+            className="size-12 rounded-xl bg-white/10 text-2xl text-white active:bg-white/25"
           >
             +
           </button>
@@ -162,9 +188,16 @@ export function ImageViewer({ ingestId, onClose }: { ingestId: string; onClose: 
             }}
           />
         ) : (
-          <p className="flex h-full items-center justify-center text-sm text-white/70">
-            {failed ? 'This file cannot be shown.' : 'Loading the page…'}
-          </p>
+          <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-white/70">
+            {!failed && (
+              <span
+                role="progressbar"
+                aria-label="Opening the page"
+                className="inline-block size-8 animate-spin rounded-full border-2 border-white/70 border-t-transparent"
+              />
+            )}
+            <p>{failed ? 'This file cannot be shown.' : 'Opening the page…'}</p>
+          </div>
         )}
       </div>
 
@@ -174,6 +207,7 @@ export function ImageViewer({ ingestId, onClose }: { ingestId: string; onClose: 
       >
         Pinch or scroll to zoom · drag to move · double-tap to reset
       </p>
-    </div>
+    </div>,
+    document.body,
   );
 }

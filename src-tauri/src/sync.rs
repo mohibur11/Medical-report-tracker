@@ -38,6 +38,14 @@ pub struct SyncReport {
     pub unchanged: usize,
     pub bytes: u64,
     pub failed: Vec<String>,
+    /// Restored files that became documents again.
+    ///
+    /// Copying the files back is only half of a restore. The database is what
+    /// knows whose report a file is and what it says; on a phone that has been
+    /// reinstalled there is no database, so the reconciler reads it back out of
+    /// the filenames — which is the whole reason they are named the way they are.
+    #[serde(default)]
+    pub adopted: usize,
 }
 
 /// Somewhere a copy of the vault can live.
@@ -122,6 +130,7 @@ impl BackupTarget for FolderTarget {
 /// that differs in length.
 fn copy_tree(from: &Path, to: &Path, location: String) -> Result<SyncReport, String> {
     let mut report = SyncReport {
+        adopted: 0,
         location,
         ..Default::default()
     };

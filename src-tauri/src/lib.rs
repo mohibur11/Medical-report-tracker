@@ -32,7 +32,7 @@ use crate::ingest::IngestItem;
 /// The id of the single local user, resolved once at startup.
 pub struct CurrentUser(pub String);
 
-#[tauri::command]
+#[tauri::command(async)]
 fn db_health(app: AppHandle, state: State<'_, Db>) -> Result<DbHealth, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     db::health(
@@ -63,7 +63,7 @@ async fn import_files(
 /// content:// URI, which nothing on the Rust side can open, so the Add button
 /// appeared to do nothing at all. The picker copies the bytes into the same inbox
 /// a shared file lands in, and this then imports them the same way.
-#[tauri::command]
+#[tauri::command(async)]
 fn pick_and_import(
     app: AppHandle,
     state: State<'_, Db>,
@@ -93,7 +93,7 @@ fn pick_and_import(
 ///
 /// Called by the phone front end when it opens and whenever it comes back to the
 /// foreground, which is exactly when a share has just happened.
-#[tauri::command]
+#[tauri::command(async)]
 fn take_shared(
     app: AppHandle,
     state: State<'_, Db>,
@@ -115,7 +115,7 @@ fn take_shared(
 /// nowhere near enough to check a date against the page. This returns the print
 /// derivative — already straightened and downscaled at ingest — so a glance can
 /// confirm what the recogniser read.
-#[tauri::command]
+#[tauri::command(async)]
 fn staged_preview(app: AppHandle, state: State<'_, Db>, id: String) -> Result<Option<String>, String> {
     use base64::Engine;
 
@@ -155,7 +155,7 @@ fn staged_preview(app: AppHandle, state: State<'_, Db>, id: String) -> Result<Op
 /// The review queue as the database has it, so a half-finished import survives
 /// closing the app.
 /// Unlock a password-protected PDF that is waiting in the queue.
-#[tauri::command]
+#[tauri::command(async)]
 fn unlock_pdf(
     state: State<'_, Db>,
     user: State<'_, CurrentUser>,
@@ -176,7 +176,7 @@ fn unlock_pdf(
 /// mentions it — so the only gate is size. A text-layer PDF is small; anything
 /// larger is a scan, and shipping tens of megabytes across the bridge to learn
 /// that would cost more than the recognition it hoped to avoid.
-#[tauri::command]
+#[tauri::command(async)]
 fn staged_pdf_text_source(
     state: State<'_, Db>,
     ingest_id: String,
@@ -216,7 +216,7 @@ fn list_staged(state: State<'_, Db>, user: State<'_, CurrentUser>) -> Result<Vec
 /// Adding the wrong photo is an ordinary mistake, and until now the only way out
 /// of it was to file the thing and then trash it — which put a document nobody
 /// wanted into the vault on the way past.
-#[tauri::command]
+#[tauri::command(async)]
 fn discard_staged(
     state: State<'_, Db>,
     user: State<'_, CurrentUser>,
@@ -230,7 +230,7 @@ fn discard_staged(
 ///
 /// Renaming moves every one of their files, so this is not the cheap operation
 /// its UI suggests; the report says exactly what moved and what did not.
-#[tauri::command]
+#[tauri::command(async)]
 fn rename_patient(
     app: AppHandle,
     state: State<'_, Db>,
@@ -307,7 +307,7 @@ fn create_patient(
 }
 
 /// Move a staged file into the vault under its canonical name.
-#[tauri::command]
+#[tauri::command(async)]
 fn commit_item(
     app: AppHandle,
     state: State<'_, Db>,
@@ -418,7 +418,7 @@ fn disable_password(
 
 /// Change a filed document's details. Moves the file if its canonical name or
 /// folder changes, which correcting a date or a patient always does.
-#[tauri::command]
+#[tauri::command(async)]
 fn update_document(
     app: AppHandle,
     state: State<'_, Db>,
@@ -448,7 +448,7 @@ fn update_document(
 }
 
 /// What is in the Trash, and whether each one can still be put back.
-#[tauri::command]
+#[tauri::command(async)]
 fn list_trashed(
     app: AppHandle,
     state: State<'_, Db>,
@@ -460,7 +460,7 @@ fn list_trashed(
 }
 
 /// Put a trashed document back where it was.
-#[tauri::command]
+#[tauri::command(async)]
 fn restore_document(
     app: AppHandle,
     state: State<'_, Db>,
@@ -473,7 +473,7 @@ fn restore_document(
 }
 
 /// Move a document to the vault's Trash folder. Nothing is unlinked.
-#[tauri::command]
+#[tauri::command(async)]
 fn trash_document(
     app: AppHandle,
     state: State<'_, Db>,
@@ -697,7 +697,7 @@ fn disconnect_google(state: State<'_, Db>) -> Result<google::Account, String> {
 ///
 /// The database snapshot is refreshed first, so what lands in Drive is the
 /// library as it is now rather than as it was at the last close.
-#[tauri::command]
+#[tauri::command(async)]
 fn backup_to_drive(
     app: AppHandle,
     state: State<'_, Db>,
@@ -727,19 +727,33 @@ fn backup_to_drive(
 }
 
 /// Copy back anything missing or different locally.
-#[tauri::command]
+#[tauri::command(async)]
 fn restore_from_drive(
     app: AppHandle,
     state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
 ) -> Result<sync::SyncReport, String> {
     let vault_root = paths::vault_root(&app)?;
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-    if google::account(&conn).connected {
-        return drive::DriveApiTarget::new(&conn).pull(&vault_root);
+    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+
+    let mut report = if google::account(&conn).connected {
+        drive::DriveApiTarget::new(&conn).pull(&vault_root)?
+    } else {
+        drive_target(&conn)
+            .ok_or("No Google Drive folder is set, and no Google account is connected.")?
+            .pull(&vault_root)?
+    };
+
+    // Files alone are not a library. A restored phone has the documents on disk
+    // and nothing that knows whose they are, so the filenames are read back into
+    // rows — the reason the naming scheme carries date, patient and title in the
+    // first place. Failing here does not undo the copy: the files are safe, and
+    // Rescan can be run again.
+    if let Ok(found) = reconcile::run(&mut conn, &user.0, &vault_root) {
+        report.adopted = found.adopted.len();
     }
-    drive_target(&conn)
-        .ok_or("No Google Drive folder is set, and no Google account is connected.")?
-        .pull(&vault_root)
+
+    Ok(report)
 }
 
 /// SQLite owns the clock here, so the timestamp matches every other one stored.
@@ -748,7 +762,7 @@ fn chrono_now(conn: &rusqlite::Connection) -> String {
         .unwrap_or_default()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn backup_now(
     app: AppHandle,
     state: State<'_, Db>,
@@ -763,7 +777,7 @@ fn backup_now(
 
 /// Compare the vault with the database and repair what can be repaired.
 /// The answer to "I moved some files in Explorer".
-#[tauri::command]
+#[tauri::command(async)]
 fn rescan_vault(
     app: AppHandle,
     state: State<'_, Db>,
@@ -786,7 +800,7 @@ fn search_documents(
 
 /// Rebuild the whole index. The repair path when the index and the library
 /// disagree, and what a vault rescan will call.
-#[tauri::command]
+#[tauri::command(async)]
 fn reindex(state: State<'_, Db>, user: State<'_, CurrentUser>) -> Result<usize, String> {
     let conn = state.0.lock().map_err(|e| e.to_string())?;
     search::reindex_all(&conn, &user.0)
@@ -895,7 +909,7 @@ async fn export_pdf(
 
 /// Reveal a finished export in Explorer, selecting the file.
 /// The escape hatch: the same filtered slice as loose, numbered files.
-#[tauri::command]
+#[tauri::command(async)]
 fn export_to_folder(
     app: AppHandle,
     state: State<'_, Db>,
@@ -925,7 +939,7 @@ fn reveal_in_explorer(path: String) -> Result<(), String> {
 /// Fetched lazily per row rather than bundled into the import response: a
 /// 200-file batch would otherwise ship several megabytes of base64 through the
 /// IPC bridge before the grid had rendered a single row.
-#[tauri::command]
+#[tauri::command(async)]
 fn staged_thumb(app: AppHandle, id: String) -> Result<Option<String>, String> {
     use base64::Engine;
 

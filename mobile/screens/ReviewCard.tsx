@@ -57,6 +57,9 @@ export function ReviewCard({
   const [ideas, setIdeas] = useState<Suggestion[]>([]);
   const [pageText, setPageText] = useState('');
   const [reading, setReading] = useState(false);
+  /** Why the page could not be read. Shown rather than swallowed: a PDF that
+   *  recognises nothing and says nothing looks like an app that does nothing. */
+  const [readError, setReadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [password, setPassword] = useState('');
   const [preview, setPreview] = useState(false);
@@ -93,7 +96,11 @@ export function ReviewCard({
           setIdeas(titles);
           if (titles[0]) setTitle((t) => t || titles[0]!.title);
         },
-        () => alive && setReading(false),
+        (e) => {
+          if (!alive) return;
+          setReading(false);
+          setReadError(String(e));
+        },
       );
     return () => {
       alive = false;
@@ -229,6 +236,11 @@ export function ReviewCard({
             <p className="mt-1 flex items-center gap-2 text-xs text-slate-400">
               <Spinner small />
               reading the page…
+            </p>
+          )}
+          {readError && (
+            <p className="selectable mt-1 text-xs text-amber-700 dark:text-amber-400">
+              Could not read this page — type the date yourself. ({readError})
             </p>
           )}
         </div>

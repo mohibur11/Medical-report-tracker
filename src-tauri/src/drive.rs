@@ -478,6 +478,7 @@ impl BackupTarget for DriveApiTarget<'_> {
         let total: usize = count_files(vault_root);
 
         let mut report = SyncReport {
+            adopted: 0,
             location: self.describe(),
             unchanged: total.saturating_sub(planned.len()),
             ..Default::default()
@@ -505,6 +506,7 @@ impl BackupTarget for DriveApiTarget<'_> {
         }
 
         let mut report = SyncReport {
+            adopted: 0,
             location: self.describe(),
             ..Default::default()
         };

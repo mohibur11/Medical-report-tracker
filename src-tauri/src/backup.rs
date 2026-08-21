@@ -27,7 +27,12 @@ pub const SNAPSHOT_NAME: &str = "medicine-report-tracker.backup.db";
 /// Sidecars use this suffix so the reconciler can tell them from stray files.
 pub const SIDECAR_SUFFIX: &str = ".meta.json";
 
-#[derive(Debug, Serialize)]
+/// Everything about a document that its filename cannot carry.
+///
+/// Read as well as written: it is what a restore uses to put a document back
+/// under the right person with its notes and tags, rather than guessing from the
+/// slug on disk.
+#[derive(Debug, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Sidecar {
     pub schema: u32,

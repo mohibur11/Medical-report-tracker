@@ -38,18 +38,9 @@ class OpenArgs {
   lateinit var url: String
 }
 
-/**
- * Reading text off a photograph, using ML Kit.
- *
- * The desktop app uses Windows.Media.Ocr, which has no equivalent here. ML Kit's
- * on-device Latin recogniser is the closest match: it runs offline, needs no
- * account, and costs nothing — which matters, because these are medical records
- * and none of them should leave the phone.
- *
- * Word boxes come back with the text. The review screen ranks several dates
- * against the words around them, so where a date sits on the page is part of
- * deciding whether it is the report's date or the patient's birthday.
- */
+/** Matches the desktop's cap, so a long bundle behaves the same on both. */
+private const val MAX_PDF_PAGES = 50
+
 /** HTTP wants its line endings exactly, and no browser is forgiving about it. */
 private const val CRLF = "\r\n"
 
@@ -64,6 +55,18 @@ private const val WAIT_PAGE =
     "<body style='font:16px system-ui;padding:3rem;text-align:center'>" +
     "<p>Waiting for Google…</p>"
 
+/**
+ * Reading text off a photograph, using ML Kit.
+ *
+ * The desktop app uses Windows.Media.Ocr, which has no equivalent here. ML Kit's
+ * on-device Latin recogniser is the closest match: it runs offline, needs no
+ * account, and costs nothing — which matters, because these are medical records
+ * and none of them should leave the phone.
+ *
+ * Word boxes come back with the text. The review screen ranks several dates
+ * against the words around them, so where a date sits on the page is part of
+ * deciding whether it is the report's date or the patient's birthday.
+ */
 @TauriPlugin
 class OcrPlugin(private val activity: Activity) : Plugin(activity) {
   private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
@@ -71,14 +74,6 @@ class OcrPlugin(private val activity: Activity) : Plugin(activity) {
   /** Open only between starting a sign-in and its answer arriving. */
   private var loopback: ServerSocket? = null
 
-  /**
-   * Choose reports from the phone's storage.
-   *
-   * The Tauri file dialog hands back a `content://` URI, which nothing on the
-   * Rust side can open — which is why the Add button appeared to do nothing. The
-   * bytes are copied into the same inbox a shared file lands in, so both routes
-   * end up in one place and go through one ingest.
-   */
   /**
    * Listen for Google's answer to a sign-in, on this phone.
    *
@@ -210,6 +205,14 @@ class OcrPlugin(private val activity: Activity) : Plugin(activity) {
     }
   }
 
+  /**
+   * Choose reports from the phone's storage.
+   *
+   * The Tauri file dialog hands back a `content://` URI, which nothing on the
+   * Rust side can open — which is why the Add button appeared to do nothing. The
+   * bytes are copied into the same inbox a shared file lands in, so both routes
+   * end up in one place and go through one ingest.
+   */
   @Command
   fun pick(invoke: Invoke) {
     val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -263,6 +266,12 @@ class OcrPlugin(private val activity: Activity) : Plugin(activity) {
    * suggested title. PdfRenderer is built into the platform and does the same job:
    * each page is drawn to a bitmap and handed to the same recogniser a photograph
    * goes through.
+   *
+   * On its own thread, and not by choice. `Tasks.await` refuses outright to run on
+   * the main thread — which is where a plugin command is called — so this threw
+   * before it recognised anything, and a PDF came back with no date, no title and
+   * no error anybody could see. A photograph never hit it because that path
+   * answers through a listener rather than waiting.
    */
   @Command
   fun recognizePdf(invoke: Invoke) {
@@ -274,50 +283,55 @@ class OcrPlugin(private val activity: Activity) : Plugin(activity) {
       return
     }
 
-    var descriptor: ParcelFileDescriptor? = null
-    var renderer: PdfRenderer? = null
-    try {
-      descriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-      renderer = PdfRenderer(descriptor)
+    Thread {
+      var descriptor: ParcelFileDescriptor? = null
+      var renderer: PdfRenderer? = null
+      try {
+        descriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+        renderer = PdfRenderer(descriptor)
 
-      val pages = JSArray()
-      for (index in 0 until renderer.pageCount) {
-        renderer.openPage(index).use { page ->
-          // Rendered at roughly 200 DPI. Below that a printed lab report starts
-          // losing the small print that carries the reference ranges.
-          val scale = 200f / 72f
-          val bitmap = Bitmap.createBitmap(
-            (page.width * scale).toInt().coerceAtLeast(1),
-            (page.height * scale).toInt().coerceAtLeast(1),
-            Bitmap.Config.ARGB_8888,
-          )
-          // PdfRenderer draws only ink; without this the page is transparent and
-          // recognition sees nothing.
-          bitmap.eraseColor(Color.WHITE)
-          page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+        val pages = JSArray()
+        // A hospital discharge bundle would otherwise hold the review queue for
+        // minutes. The pages carrying the date are at the front.
+        val count = minOf(renderer.pageCount, MAX_PDF_PAGES)
+        for (index in 0 until count) {
+          renderer.openPage(index).use { page ->
+            // Rendered at roughly 200 DPI. Below that a printed lab report starts
+            // losing the small print that carries the reference ranges.
+            val scale = 200f / 72f
+            val bitmap = Bitmap.createBitmap(
+              (page.width * scale).toInt().coerceAtLeast(1),
+              (page.height * scale).toInt().coerceAtLeast(1),
+              Bitmap.Config.ARGB_8888,
+            )
+            // PdfRenderer draws only ink; without this the page is transparent and
+            // recognition sees nothing.
+            bitmap.eraseColor(Color.WHITE)
+            page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
 
-          val result = Tasks.await(recognizer.process(InputImage.fromBitmap(bitmap, 0)))
-          bitmap.recycle()
+            val result = Tasks.await(recognizer.process(InputImage.fromBitmap(bitmap, 0)))
+            bitmap.recycle()
 
-          val entry = JSObject()
-          entry.put("text", result.text)
-          entry.put("words", JSArray())
-          entry.put("engine", "mlkit-latin/pdfrenderer")
-          entry.put("millis", System.currentTimeMillis() - started)
-          entry.put("pageNo", index + 1)
-          pages.put(entry)
+            val entry = JSObject()
+            entry.put("text", result.text)
+            entry.put("words", JSArray())
+            entry.put("engine", "mlkit-latin/pdfrenderer")
+            entry.put("millis", System.currentTimeMillis() - started)
+            entry.put("pageNo", index + 1)
+            pages.put(entry)
+          }
         }
-      }
 
-      val response = JSObject()
-      response.put("pages", pages)
-      invoke.resolve(response)
-    } catch (e: Exception) {
-      invoke.reject(e.message ?: "cannot read this PDF")
-    } finally {
-      renderer?.close()
-      descriptor?.close()
-    }
+        val response = JSObject()
+        response.put("pages", pages)
+        activity.runOnUiThread { invoke.resolve(response) }
+      } catch (e: Exception) {
+        activity.runOnUiThread { invoke.reject(e.message ?: "cannot read this PDF") }
+      } finally {
+        renderer?.close()
+        descriptor?.close()
+      }
+    }.start()
   }
 
   @Command
