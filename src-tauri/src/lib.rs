@@ -109,6 +109,49 @@ fn take_shared(
 }
 
 
+/// The staged file itself, big enough to read.
+///
+/// The thumbnail is 320 pixels, which is enough to tell two reports apart and
+/// nowhere near enough to check a date against the page. This returns the print
+/// derivative — already straightened and downscaled at ingest — so a glance can
+/// confirm what the recogniser read.
+#[tauri::command]
+fn staged_preview(app: AppHandle, state: State<'_, Db>, id: String) -> Result<Option<String>, String> {
+    use base64::Engine;
+
+    // `id` reaches the filesystem, so it must be a ULID and nothing else.
+    if id.len() != 26 || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return Err("invalid id".into());
+    }
+
+    let (staged, kind): (Option<String>, Option<String>) = {
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT staged_path, file_kind FROM ingest_items WHERE id = ?1",
+            rusqlite::params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap_or((None, None))
+    };
+
+    // A PDF cannot be shown as an image, and the page picture drawn at ingest is
+    // the best there is without a renderer here.
+    let is_raster = matches!(kind.as_deref(), Some("jpeg" | "png" | "tiff" | "webp"));
+    let path = match (staged, is_raster) {
+        (Some(p), true) => std::path::PathBuf::from(p),
+        _ => paths::staging_dir(&app)?.join(format!("{id}.thumb.jpg")),
+    };
+
+    match std::fs::read(&path) {
+        Ok(bytes) => Ok(Some(format!(
+            "data:image/jpeg;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        ))),
+        Err(_) => Ok(None),
+    }
+}
+
+
 /// The review queue as the database has it, so a half-finished import survives
 /// closing the app.
 /// Unlock a password-protected PDF that is waiting in the queue.
@@ -1057,6 +1100,7 @@ pub fn run() {
             staged_pdf_text_source,
             unlock_pdf,
             staged_thumb,
+            staged_preview,
             list_patients,
             create_patient,
             list_export_presets,

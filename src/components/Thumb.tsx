@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 
+import { ImageViewer } from './ImageViewer.tsx';
 import { stagedThumb, type FileKind } from '../lib/ipc.ts';
 
 /**
@@ -9,6 +10,7 @@ import { stagedThumb, type FileKind } from '../lib/ipc.ts';
  */
 export function Thumb({ id, kind }: { id: string; kind: FileKind }) {
   const [src, setSrc] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -25,18 +27,24 @@ export function Thumb({ id, kind }: { id: string; kind: FileKind }) {
     'flex h-16 w-12 shrink-0 items-center justify-center overflow-hidden rounded border ' +
     'border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-800';
 
-  if (src) {
-    return (
-      <div className={base}>
-        <img src={src} alt="" className="h-full w-full object-cover" />
-      </div>
-    );
-  }
-
-  // PDFs have no raster thumbnail until pdf.js renders page 1 (Phase 1, later step).
   return (
-    <div className={`${base} text-[10px] font-medium uppercase text-slate-400`}>
-      {kind === 'pdf' ? 'PDF' : kind === 'heic' ? 'HEIC' : '—'}
-    </div>
+    <>
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        title="Open the page to check it"
+        className={`${base} cursor-zoom-in p-0`}
+      >
+        {src ? (
+          <img src={src} alt="" className="h-full w-full object-cover" />
+        ) : (
+          <span className="text-[10px] font-medium uppercase text-slate-400">
+            {kind === 'pdf' ? 'PDF' : kind === 'heic' ? 'HEIC' : '—'}
+          </span>
+        )}
+      </button>
+
+      {open && <ImageViewer ingestId={id} onClose={() => setOpen(false)} />}
+    </>
   );
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { Spinner } from './Capture.tsx';
+import { ImageViewer } from '../../src/components/ImageViewer.tsx';
 import { detectConflicts, isBlocked, type Conflict } from '../../src/lib/extract/conflicts.ts';
 import {
   formatDmy,
@@ -54,6 +55,7 @@ export function ReviewCard({
   const [reading, setReading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [password, setPassword] = useState('');
+  const [preview, setPreview] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -169,16 +171,25 @@ export function ReviewCard({
 
   return (
     <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
+      {preview && <ImageViewer ingestId={item.id} onClose={() => setPreview(false)} />}
       <div className="flex gap-3 p-3">
-        <div className="h-24 w-18 shrink-0 overflow-hidden rounded-lg bg-slate-100 dark:bg-slate-800">
+        <button
+          type="button"
+          onClick={() => setPreview(true)}
+          aria-label="Open the page"
+          className="relative h-24 w-18 shrink-0 overflow-hidden rounded-lg bg-slate-100 dark:bg-slate-800"
+        >
           {thumb ? (
             <img src={thumb} alt="" className="h-full w-full object-cover" />
           ) : (
-            <div className="flex h-full items-center justify-center text-[10px] font-medium uppercase text-slate-400">
+            <span className="flex h-full items-center justify-center text-[10px] font-medium uppercase text-slate-400">
               {item.fileKind}
-            </div>
+            </span>
           )}
-        </div>
+          <span className="absolute bottom-0 right-0 rounded-tl bg-black/60 px-1 text-[10px] text-white">
+            tap
+          </span>
+        </button>
         <div className="min-w-0 flex-1">
           <p className="selectable truncate text-xs text-slate-500 dark:text-slate-400">
             {item.fileName}

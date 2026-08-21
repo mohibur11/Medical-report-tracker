@@ -58,6 +58,15 @@ export const stagedThumb = (id: string): Promise<string | null> =>
   invoke('staged_thumb', { id });
 
 /**
+ * The staged file at a size worth looking at.
+ *
+ * The thumbnail tells two reports apart; this is for checking a date against the
+ * page it was read from. PDFs come back as their first-page picture.
+ */
+export const stagedPreview = (id: string): Promise<string | null> =>
+  invoke('staged_preview', { id });
+
+/**
  * The review queue as stored, not as remembered.
  *
  * Staging is durable, so a backlog import that was closed halfway through comes
