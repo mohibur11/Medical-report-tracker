@@ -342,6 +342,34 @@ pub fn staged_target(conn: &rusqlite::Connection, ingest_id: &str) -> Result<Sta
 }
 
 pub fn recognize_file(path: &std::path::Path, kind: &str) -> Result<Vec<OcrPage>, String> {
+    // Android has no pdfcpu to extract page images with, but it does have
+    // PdfRenderer, so the Kotlin side reads the whole document itself.
+    #[cfg(target_os = "android")]
+    if kind == "pdf" {
+        #[derive(serde::Serialize)]
+        struct Args {
+            path: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct Pages {
+            pages: Vec<OcrPage>,
+        }
+
+        let handle = ANDROID_OCR
+            .get()
+            .ok_or("the text recogniser was not available when the app started")?;
+
+        return handle
+            .run_mobile_plugin::<Pages>(
+                "recognizePdf",
+                Args {
+                    path: path.display().to_string(),
+                },
+            )
+            .map(|p| p.pages)
+            .map_err(|e| format!("cannot read this PDF: {e}"));
+    }
+
     if kind == "pdf" {
         let work = path.with_extension("pages");
         let result = recognize_pdf(path, &work);

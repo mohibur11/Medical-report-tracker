@@ -2,7 +2,11 @@ package com.mohibur.medicinereporttracker
 
 import android.app.Activity
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Color
+import android.graphics.pdf.PdfRenderer
+import android.os.ParcelFileDescriptor
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.result.ActivityResult
@@ -15,6 +19,7 @@ import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSArray
 import app.tauri.plugin.JSObject
 import app.tauri.plugin.Plugin
+import com.google.android.gms.tasks.Tasks
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
@@ -92,6 +97,71 @@ class OcrPlugin(private val activity: Activity) : Plugin(activity) {
       val column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
       if (column >= 0 && cursor.moveToFirst()) cursor.getString(column) else null
     }
+
+  /**
+   * Read every page of a PDF.
+   *
+   * The desktop extracts page images with pdfcpu, which cannot run on Android at
+   * all — so without this a PDF from a lab was filed with no text, no date and no
+   * suggested title. PdfRenderer is built into the platform and does the same job:
+   * each page is drawn to a bitmap and handed to the same recogniser a photograph
+   * goes through.
+   */
+  @Command
+  fun recognizePdf(invoke: Invoke) {
+    val args = invoke.parseArgs(RecognizeArgs::class.java)
+    val started = System.currentTimeMillis()
+    val file = File(args.path)
+    if (!file.exists()) {
+      invoke.reject("cannot find the PDF at ${args.path}")
+      return
+    }
+
+    var descriptor: ParcelFileDescriptor? = null
+    var renderer: PdfRenderer? = null
+    try {
+      descriptor = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+      renderer = PdfRenderer(descriptor)
+
+      val pages = JSArray()
+      for (index in 0 until renderer.pageCount) {
+        renderer.openPage(index).use { page ->
+          // Rendered at roughly 200 DPI. Below that a printed lab report starts
+          // losing the small print that carries the reference ranges.
+          val scale = 200f / 72f
+          val bitmap = Bitmap.createBitmap(
+            (page.width * scale).toInt().coerceAtLeast(1),
+            (page.height * scale).toInt().coerceAtLeast(1),
+            Bitmap.Config.ARGB_8888,
+          )
+          // PdfRenderer draws only ink; without this the page is transparent and
+          // recognition sees nothing.
+          bitmap.eraseColor(Color.WHITE)
+          page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+
+          val result = Tasks.await(recognizer.process(InputImage.fromBitmap(bitmap, 0)))
+          bitmap.recycle()
+
+          val entry = JSObject()
+          entry.put("text", result.text)
+          entry.put("words", JSArray())
+          entry.put("engine", "mlkit-latin/pdfrenderer")
+          entry.put("millis", System.currentTimeMillis() - started)
+          entry.put("pageNo", index + 1)
+          pages.put(entry)
+        }
+      }
+
+      val response = JSObject()
+      response.put("pages", pages)
+      invoke.resolve(response)
+    } catch (e: Exception) {
+      invoke.reject(e.message ?: "cannot read this PDF")
+    } finally {
+      renderer?.close()
+      descriptor?.close()
+    }
+  }
 
   @Command
   fun recognize(invoke: Invoke) {

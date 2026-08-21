@@ -87,8 +87,11 @@ refuses it. Expect a Play Protect warning about an unknown developer.
   the Windows recogniser does, which is what lets the date ranker behave
   identically on both. It compiles and packages; whether it recognises a real
   report has not been tested.
-- **PDFs are not read on Android.** Page images are extracted with pdfcpu, which
-  cannot run there, so recognition covers photographs only.
+- **PDFs are read with PdfRenderer.** pdfcpu cannot run on Android, so the Kotlin
+  side draws each page to a bitmap at about 200 DPI and hands it to the same
+  recogniser a photograph goes through. Below that resolution a printed lab report
+  starts losing its small print. The page is painted white first: PdfRenderer
+  draws only ink, and a transparent page recognises as nothing.
 - **HTTPS needs the roots compiled in.** reqwest's `rustls-tls` reads the
   platform certificate store, which Android does not expose the way a desktop
   does, so every call failed with "error sending request" — including the token
