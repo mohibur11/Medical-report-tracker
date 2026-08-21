@@ -540,8 +540,19 @@ async fn connect_google(
     // open: signing in takes as long as the person takes, and holding it would
     // freeze every other part of the app until they finished.
     let (client_id, client_secret) = {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
-        google::client_credentials(&conn)?
+        // Android signs in with the client compiled into the app, because the
+        // redirect scheme derived from it is declared in the manifest and the two
+        // cannot be allowed to disagree.
+        #[cfg(target_os = "android")]
+        {
+            (String::new(), String::new())
+        }
+
+        #[cfg(not(target_os = "android"))]
+        {
+            let conn = state.0.lock().map_err(|e| e.to_string())?;
+            google::client_credentials(&conn)?
+        }
     };
 
     // The browser is opened through the opener plugin, which knows how to do it

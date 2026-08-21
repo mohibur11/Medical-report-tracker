@@ -31,6 +31,18 @@ class MainActivity : TauriActivity() {
 
   private fun receive(intent: Intent?) {
     if (intent == null) return
+
+    // The sign-in answer. Written to a file rather than handed straight to the
+    // Rust side, because it can arrive while the app is still being woken and
+    // nothing is listening for it yet.
+    val link = intent.data
+    if (intent.action == Intent.ACTION_VIEW &&
+      link?.scheme?.startsWith("com.googleusercontent.apps.") == true
+    ) {
+      runCatching { File(filesDir, "oauth-reply.txt").writeText(link.toString()) }
+      return
+    }
+
     val uris: List<Uri> = when (intent.action) {
       Intent.ACTION_SEND -> listOfNotNull(uriFrom(intent, Intent.EXTRA_STREAM))
       Intent.ACTION_SEND_MULTIPLE -> urisFrom(intent)

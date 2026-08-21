@@ -19,6 +19,16 @@
             <!-- Share a photo or a PDF to this app from anywhere: the camera roll,
                  WhatsApp, a mail attachment. On a phone this is the capture path
                  that actually gets used. -->
+            <!-- Google's answer to the sign-in arrives as an intent on this
+                 scheme, the reversed Android client ID. An intent wakes the app
+                 even when Android has frozen it; a loopback socket cannot. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="com.googleusercontent.apps.787400087523-mpisfskhtef3js80gsgqsj0gq9sbidku" />
+            </intent-filter>
+
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />

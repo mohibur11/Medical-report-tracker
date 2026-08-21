@@ -36,8 +36,20 @@ pub const CLIENT_SECRET: &str = "google_client_secret";
 const REFRESH_TOKEN: &str = "google_refresh_token";
 const ACCOUNT_EMAIL: &str = "google_account_email";
 
-/// How long the browser half of the flow may take before the listener gives up.
+/// How long the browser half of the flow may take before it is given up on.
 const CONSENT_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// The Android client, registered against this app's package name and signing
+/// fingerprint.
+///
+/// Baked in rather than asked for, because the redirect scheme derived from it
+/// has to be declared in the manifest at build time — the two cannot disagree.
+/// Android clients carry no secret; PKCE is what protects the exchange.
+#[cfg(target_os = "android")]
+pub const ANDROID_CLIENT_ID: &str = "787400087523-mpisfskhtef3js80gsgqsj0gq9sbidku.apps.googleusercontent.com";
+
+#[cfg(target_os = "android")]
+const ANDROID_REDIRECT: &str = "com.googleusercontent.apps.787400087523-mpisfskhtef3js80gsgqsj0gq9sbidku:/oauth2redirect";
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,10 +61,16 @@ pub struct Account {
 }
 
 pub fn account(conn: &Connection) -> Account {
+    // Android carries its own client, so there is nothing for the user to set up.
+    #[cfg(target_os = "android")]
+    let configured = true;
+    #[cfg(not(target_os = "android"))]
+    let configured = db::setting(conn, CLIENT_ID).is_some();
+
     Account {
         email: db::setting(conn, ACCOUNT_EMAIL),
         connected: db::setting(conn, REFRESH_TOKEN).is_some(),
-        configured: db::setting(conn, CLIENT_ID).is_some(),
+        configured,
     }
 }
 
@@ -172,6 +190,14 @@ pub fn run_flow(
     client_secret: &str,
     open_url: impl FnOnce(&str) -> Result<(), String>,
 ) -> Result<Tokens, String> {
+    #[cfg(target_os = "android")]
+    {
+        let _ = (client_id, client_secret);
+        return android_flow(open_url);
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
 
     // Port 0 asks the OS for a free one; Google allows any port on loopback.
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -241,6 +267,118 @@ pub fn run_flow(
         expires_in: token.expires_in.unwrap_or(3600),
         email,
     })
+    }
+}
+
+/// The phone's sign-in, which uses no socket at all.
+///
+/// Google redirects to a scheme this app claims in its manifest, Android
+/// delivers that as an intent, and the activity writes it to a file. An intent
+/// wakes a frozen process; a loopback listener in a frozen process simply stops
+/// accepting, which is what made three earlier attempts hang.
+#[cfg(target_os = "android")]
+fn android_flow(open_url: impl FnOnce(&str) -> Result<(), String>) -> Result<Tokens, String> {
+    let (verifier, challenge) = pkce_pair();
+    let state = base64_url_nopad(&{
+        use rand_core::RngCore;
+        let mut b = [0u8; 16];
+        rand_core::OsRng.fill_bytes(&mut b);
+        b
+    });
+
+    let url = format!(
+        "{AUTH_ENDPOINT}?client_id={}&redirect_uri={}&response_type=code&scope={}\
+         &code_challenge={}&code_challenge_method=S256&state={}&access_type=offline&prompt=consent",
+        percent_encode(ANDROID_CLIENT_ID),
+        percent_encode(ANDROID_REDIRECT),
+        percent_encode(SCOPE),
+        percent_encode(&challenge),
+        percent_encode(&state),
+    );
+
+    let _ = std::fs::remove_file(reply_path());
+    open_url(&url)?;
+
+    let code = wait_for_reply(&state)?;
+
+    let response = reqwest::blocking::Client::new()
+        .post(TOKEN_ENDPOINT)
+        .form(&[
+            ("code", code.as_str()),
+            ("client_id", ANDROID_CLIENT_ID),
+            ("redirect_uri", ANDROID_REDIRECT),
+            ("grant_type", "authorization_code"),
+            ("code_verifier", verifier.as_str()),
+        ])
+        .send()
+        .map_err(|e| format!("cannot reach Google: {e}"))?;
+
+    if !response.status().is_success() {
+        return Err(explain_token_error(&response.text().unwrap_or_default()));
+    }
+
+    let token: TokenResponse = response
+        .json()
+        .map_err(|e| format!("Google's reply could not be read: {e}"))?;
+    let refresh = token
+        .refresh_token
+        .ok_or("Google did not return a refresh token. Remove this app at myaccount.google.com/permissions and try again.")?;
+    let email = fetch_email(&token.access_token);
+
+    Ok(Tokens {
+        refresh,
+        access: token.access_token,
+        expires_in: token.expires_in.unwrap_or(3600),
+        email,
+    })
+}
+
+/// Where the activity leaves what Google sent back.
+#[cfg(target_os = "android")]
+fn reply_path() -> std::path::PathBuf {
+    std::path::PathBuf::from("/data/data/com.mohibur.medicinereporttracker/files/oauth-reply.txt")
+}
+
+#[cfg(target_os = "android")]
+fn wait_for_reply(expected_state: &str) -> Result<String, String> {
+    let deadline = SystemTime::now() + CONSENT_TIMEOUT;
+    loop {
+        if let Ok(raw) = std::fs::read_to_string(reply_path()) {
+            let _ = std::fs::remove_file(reply_path());
+
+            let query = raw.split_once('?').map(|(_, q)| q).unwrap_or_default();
+            let mut code = None;
+            let mut state = None;
+            let mut error = None;
+            for pair in query.split('&') {
+                let Some((key, value)) = pair.split_once('=') else { continue };
+                let value = decode_component(value);
+                match key {
+                    "code" => code = Some(value),
+                    "state" => state = Some(value),
+                    "error" => error = Some(value),
+                    _ => {}
+                }
+            }
+
+            if let Some(e) = error {
+                return Err(if e == "access_denied" {
+                    "Sign-in was declined.".to_string()
+                } else {
+                    format!("Google reported: {e}")
+                });
+            }
+            if state.as_deref() != Some(expected_state) {
+                return Err("The reply from Google did not match this sign-in attempt.".into());
+            }
+            return code.ok_or_else(|| "Google's reply carried no authorization code.".to_string());
+        }
+
+        if SystemTime::now() > deadline {
+            return Err("Google did not answer within three minutes. Try again.".into());
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
 }
 
 /// Keep what the sign-in returned. Sealed, because the refresh token is standing
