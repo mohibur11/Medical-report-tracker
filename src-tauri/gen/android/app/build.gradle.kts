@@ -59,6 +59,10 @@ rust {
 
 dependencies {
     implementation("androidx.webkit:webkit:1.14.0")
+    // Custom Tabs. The sign-in has to happen without this app leaving the
+    // foreground: Android freezes a cached process, and the loopback listener
+    // waiting for Google's answer stops being able to accept anything.
+    implementation("androidx.browser:browser:1.8.0")
     // On-device text recognition. Bundled rather than the Play-services variant so
     // it works on a phone with no Google Play, and so nothing about a medical
     // record depends on a network call.

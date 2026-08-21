@@ -10,6 +10,7 @@ import android.os.ParcelFileDescriptor
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.result.ActivityResult
+import androidx.browser.customtabs.CustomTabsIntent
 import app.tauri.annotation.ActivityCallback
 import java.io.File
 import app.tauri.annotation.Command
@@ -27,6 +28,11 @@ import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 @InvokeArg
 class RecognizeArgs {
   lateinit var path: String
+}
+
+@InvokeArg
+class OpenArgs {
+  lateinit var url: String
 }
 
 /**
@@ -53,6 +59,36 @@ class OcrPlugin(private val activity: Activity) : Plugin(activity) {
    * bytes are copied into the same inbox a shared file lands in, so both routes
    * end up in one place and go through one ingest.
    */
+  /**
+   * Open the Google sign-in without leaving the app.
+   *
+   * Handing the URL to the system browser sends this app to the background, and
+   * Android freezes a cached process — which stops the loopback listener waiting
+   * for Google's answer from accepting anything, so the redirect arrives at a
+   * port that never replies. A Custom Tab runs in this app's own task, so the
+   * process stays awake and the listener keeps running.
+   */
+  @Command
+  fun openAuth(invoke: Invoke) {
+    val args = invoke.parseArgs(OpenArgs::class.java)
+    try {
+      CustomTabsIntent.Builder()
+        .setShowTitle(true)
+        .build()
+        .launchUrl(activity, Uri.parse(args.url))
+      invoke.resolve()
+    } catch (e: Exception) {
+      // No browser that supports Custom Tabs. Falling back to whatever will open
+      // it is better than refusing, even though the freeze may then apply.
+      try {
+        activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(args.url)))
+        invoke.resolve()
+      } catch (inner: Exception) {
+        invoke.reject(inner.message ?: "cannot open a browser")
+      }
+    }
+  }
+
   @Command
   fun pick(invoke: Invoke) {
     val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {

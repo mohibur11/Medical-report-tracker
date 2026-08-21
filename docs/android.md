@@ -97,6 +97,12 @@ refuses it. Expect a Play Protect warning about an unknown developer.
   does, so every call failed with "error sending request" — including the token
   exchange, long after the sign-in itself had succeeded. The build uses
   `rustls-tls-webpki-roots` instead.
+- **The sign-in must open inside the app.** Handing the URL to the system browser
+  sends this app to the background, Android freezes the cached process, and the
+  loopback listener waiting for Google's redirect stops accepting — the browser
+  reports ERR_NETWORK_CHANGED against a `127.0.0.1` URL that carries a perfectly
+  good authorization code. A Custom Tab runs in this app's own task, so the
+  process stays awake and the listener keeps running.
 - **Google Drive sign-in reaches the token exchange.** The loopback listener
   binds inside the app and the browser on the same phone can reach it, so the
   desktop OAuth client is reused as-is. Opening the browser goes through the

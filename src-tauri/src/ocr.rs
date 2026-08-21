@@ -159,6 +159,28 @@ pub fn recognize(path: &std::path::Path) -> Result<OcrPage, String> {
         .map_err(|e| format!("cannot read this page: {e}"))
 }
 
+/// Open a URL in a tab inside this app.
+///
+/// Used for the Google sign-in, which must not send the app to the background:
+/// Android freezes cached processes, and the listener waiting for the redirect
+/// stops accepting the moment that happens.
+#[cfg(target_os = "android")]
+pub fn open_in_app(url: &str) -> Result<(), String> {
+    #[derive(serde::Serialize)]
+    struct Args<'a> {
+        url: &'a str,
+    }
+
+    let handle = ANDROID_OCR
+        .get()
+        .ok_or("the browser was not available when the app started")?;
+
+    handle
+        .run_mobile_plugin::<serde_json::Value>("openAuth", Args { url })
+        .map(|_| ())
+        .map_err(|e| format!("cannot open the sign-in page: {e}"))
+}
+
 /// Ask the phone for files, copying them into the shared inbox.
 ///
 /// Returns how many were taken; `ingest::take_shared` is what turns them into

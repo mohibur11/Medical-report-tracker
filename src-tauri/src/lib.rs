@@ -549,11 +549,23 @@ async fn connect_google(
     let opener = app.clone();
     let tokens = tauri::async_runtime::spawn_blocking(move || {
         google::run_flow(&client_id, &client_secret, |url| {
-            use tauri_plugin_opener::OpenerExt;
-            opener
-                .opener()
-                .open_url(url, None::<&str>)
-                .map_err(|e| format!("cannot open the browser: {e}"))
+            // On a phone the page opens inside this app. Sending it to the system
+            // browser backgrounds the app, Android freezes the process, and the
+            // listener waiting for Google's redirect stops accepting.
+            #[cfg(target_os = "android")]
+            {
+                let _ = &opener;
+                return ocr::open_in_app(url);
+            }
+
+            #[cfg(not(target_os = "android"))]
+            {
+                use tauri_plugin_opener::OpenerExt;
+                opener
+                    .opener()
+                    .open_url(url, None::<&str>)
+                    .map_err(|e| format!("cannot open the browser: {e}"))
+            }
         })
     })
     .await
