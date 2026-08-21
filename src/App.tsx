@@ -30,6 +30,7 @@ import {
   listDocuments,
   listPatients,
   listStaged,
+  listTrashed,
   listYears,
   lockState,
   type LockState,
@@ -42,6 +43,7 @@ import {
   type DocumentRow,
   type IngestItem,
   type Patient,
+  type TrashedDocument,
 } from './lib/ipc.ts';
 
 /**
@@ -56,6 +58,7 @@ export default function App() {
   const [patients, setPatients] = useState<Patient[]>([]);
   const [items, setItems] = useState<IngestItem[]>([]);
   const [docs, setDocs] = useState<DocumentRow[]>([]);
+  const [trashed, setTrashed] = useState<TrashedDocument[]>([]);
   const [years, setYears] = useState<string[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   /** documentId -> categoryIds, fetched in one call rather than per row. */
@@ -135,6 +138,9 @@ export default function App() {
     listPatients().then(setPatients, fail);
     listYears().then(setYears, fail);
     listCategories().then(setCategories, fail);
+    // Fetched with the documents, because deleting one moves it from that list to
+    // this one and the two must never disagree about where a file is.
+    listTrashed().then(setTrashed, fail);
 
     // Fetched together because the opening view depends on both: files waiting to
     // be reviewed outrank a library that is already filed.
@@ -489,7 +495,7 @@ export default function App() {
             <LockSettings state={lock} onChanged={refreshLock} />
             <VaultTools onRepaired={refresh} />
             <DrivePanel onRestored={refresh} />
-            <TrashPanel onRestored={refresh} />
+            <TrashPanel items={trashed} onChanged={refresh} />
             {patients.length > 0 && <PatientsPanel patients={patients} onChanged={refresh} />}
             <div className="border-b border-slate-200 px-6 py-3 dark:border-slate-800">
               <CategoryManager categories={categories} onChanged={refresh} />

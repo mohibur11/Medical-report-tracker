@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 
 import { formatDmy } from '../lib/extract/dates.ts';
-import { listTrashed, restoreDocument, type TrashedDocument } from '../lib/ipc.ts';
+import { restoreDocument, type TrashedDocument } from '../lib/ipc.ts';
 
 /**
  * What has been deleted, and the way back.
@@ -9,14 +9,23 @@ import { listTrashed, restoreDocument, type TrashedDocument } from '../lib/ipc.t
  * Delete never unlinks anything — it moves the file into the vault's Trash folder
  * and keeps the row. Without this panel the only way back was Explorer plus a
  * rescan, which is not a recovery path anybody finds when they need it.
+ *
+ * The list is handed in rather than fetched here. Fetching it on mount meant the
+ * panel only reloaded when it was mounted afresh: deleting a document made it
+ * vanish from the library and appear nowhere, until you left the view and came
+ * back. One place now decides what is in the trash and what is in the library,
+ * and both change together.
  */
-export function TrashPanel({ onRestored }: { onRestored: () => void }) {
-  const [items, setItems] = useState<TrashedDocument[]>([]);
+export function TrashPanel({
+  items,
+  onChanged,
+}: {
+  items: TrashedDocument[];
+  /** Something moved between the trash and the library; reload both. */
+  onChanged: () => void;
+}) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  const refresh = () => listTrashed().then(setItems, (e: unknown) => setError(String(e)));
-  useEffect(() => void refresh(), []);
 
   if (items.length === 0) return null;
 
@@ -25,8 +34,7 @@ export function TrashPanel({ onRestored }: { onRestored: () => void }) {
     setError(null);
     try {
       await restoreDocument(item.id);
-      await refresh();
-      onRestored();
+      onChanged();
     } catch (e) {
       setError(String(e));
     } finally {
