@@ -76,6 +76,17 @@ export const stagedPreview = (id: string): Promise<string | null> =>
 export const listStaged = (): Promise<IngestItem[]> => invoke('list_staged');
 
 /**
+ * Take a file back out of the review queue. Resolves to the name it was removed
+ * under, so the confirmation can say which one went.
+ *
+ * The file the user picked from is untouched; only the app's own staged copy and
+ * its thumbnail go. A file that has already been filed is refused — that one is
+ * a document now, and the library's trash is where it belongs.
+ */
+export const discardStaged = (id: string): Promise<string> =>
+  invoke('discard_staged', { id });
+
+/**
  * Import anything shared to the app since it last looked.
  *
  * Android only in practice: a photo shared from the camera roll or WhatsApp is

@@ -39,18 +39,6 @@ const ACCOUNT_EMAIL: &str = "google_account_email";
 /// How long the browser half of the flow may take before it is given up on.
 const CONSENT_TIMEOUT: Duration = Duration::from_secs(180);
 
-/// The Android client, registered against this app's package name and signing
-/// fingerprint.
-///
-/// Baked in rather than asked for, because the redirect scheme derived from it
-/// has to be declared in the manifest at build time — the two cannot disagree.
-/// Android clients carry no secret; PKCE is what protects the exchange.
-#[cfg(target_os = "android")]
-pub const ANDROID_CLIENT_ID: &str = "787400087523-mpisfskhtef3js80gsgqsj0gq9sbidku.apps.googleusercontent.com";
-
-#[cfg(target_os = "android")]
-const ANDROID_REDIRECT: &str = "com.googleusercontent.apps.787400087523-mpisfskhtef3js80gsgqsj0gq9sbidku:/oauth2redirect";
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
@@ -61,10 +49,6 @@ pub struct Account {
 }
 
 pub fn account(conn: &Connection) -> Account {
-    // Android carries its own client, so there is nothing for the user to set up.
-    #[cfg(target_os = "android")]
-    let configured = true;
-    #[cfg(not(target_os = "android"))]
     let configured = db::setting(conn, CLIENT_ID).is_some();
 
     Account {
@@ -192,8 +176,7 @@ pub fn run_flow(
 ) -> Result<Tokens, String> {
     #[cfg(target_os = "android")]
     {
-        let _ = (client_id, client_secret);
-        return android_flow(open_url);
+        return android_flow(client_id, client_secret, open_url);
     }
 
     #[cfg(not(target_os = "android"))]
@@ -270,14 +253,26 @@ pub fn run_flow(
     }
 }
 
-/// The phone's sign-in, which uses no socket at all.
+/// The phone's sign-in.
 ///
-/// Google redirects to a scheme this app claims in its manifest, Android
-/// delivers that as an intent, and the activity writes it to a file. An intent
-/// wakes a frozen process; a loopback listener in a frozen process simply stops
-/// accepting, which is what made three earlier attempts hang.
+/// Identical to the desktop's in everything Google can see: the same desktop
+/// OAuth client, the same PKCE, the same `http://127.0.0.1:PORT` redirect. Only
+/// the socket differs — it is opened by Kotlin rather than here, because a
+/// listener bound in Rust never accepted the connection the browser made to it,
+/// and the sign-in hung with it.
+///
+/// An Android OAuth client was tried first and is a dead end: Google refuses one
+/// at the browser authorization endpoint outright, with `Error 400:
+/// invalid_request`. Android clients exist for the native sign-in libraries.
 #[cfg(target_os = "android")]
-fn android_flow(open_url: impl FnOnce(&str) -> Result<(), String>) -> Result<Tokens, String> {
+fn android_flow(
+    client_id: &str,
+    client_secret: &str,
+    open_url: impl FnOnce(&str) -> Result<(), String>,
+) -> Result<Tokens, String> {
+    let port = crate::ocr::start_loopback()?;
+    let redirect = format!("http://127.0.0.1:{port}");
+
     let (verifier, challenge) = pkce_pair();
     let state = base64_url_nopad(&{
         use rand_core::RngCore;
@@ -287,26 +282,27 @@ fn android_flow(open_url: impl FnOnce(&str) -> Result<(), String>) -> Result<Tok
     });
 
     let url = format!(
-        "{AUTH_ENDPOINT}?client_id={}&redirect_uri={}&response_type=code&scope={}\
-         &code_challenge={}&code_challenge_method=S256&state={}&access_type=offline&prompt=consent",
-        percent_encode(ANDROID_CLIENT_ID),
-        percent_encode(ANDROID_REDIRECT),
+        "{AUTH_ENDPOINT}?client_id={}&redirect_uri={}&response_type=code&scope={}&code_challenge={}&code_challenge_method=S256&state={}&access_type=offline&prompt=consent",
+        percent_encode(client_id),
+        percent_encode(&redirect),
         percent_encode(SCOPE),
         percent_encode(&challenge),
         percent_encode(&state),
     );
 
-    let _ = std::fs::remove_file(reply_path());
     open_url(&url)?;
 
-    let code = wait_for_reply(&state)?;
+    let query = crate::ocr::await_redirect()?;
+    let code = code_from_query(&query, &state)
+        .ok_or("Google's reply carried no authorization code.")??;
 
     let response = reqwest::blocking::Client::new()
         .post(TOKEN_ENDPOINT)
         .form(&[
             ("code", code.as_str()),
-            ("client_id", ANDROID_CLIENT_ID),
-            ("redirect_uri", ANDROID_REDIRECT),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("redirect_uri", redirect.as_str()),
             ("grant_type", "authorization_code"),
             ("code_verifier", verifier.as_str()),
         ])
@@ -331,54 +327,6 @@ fn android_flow(open_url: impl FnOnce(&str) -> Result<(), String>) -> Result<Tok
         expires_in: token.expires_in.unwrap_or(3600),
         email,
     })
-}
-
-/// Where the activity leaves what Google sent back.
-#[cfg(target_os = "android")]
-fn reply_path() -> std::path::PathBuf {
-    std::path::PathBuf::from("/data/data/com.mohibur.medicinereporttracker/files/oauth-reply.txt")
-}
-
-#[cfg(target_os = "android")]
-fn wait_for_reply(expected_state: &str) -> Result<String, String> {
-    let deadline = SystemTime::now() + CONSENT_TIMEOUT;
-    loop {
-        if let Ok(raw) = std::fs::read_to_string(reply_path()) {
-            let _ = std::fs::remove_file(reply_path());
-
-            let query = raw.split_once('?').map(|(_, q)| q).unwrap_or_default();
-            let mut code = None;
-            let mut state = None;
-            let mut error = None;
-            for pair in query.split('&') {
-                let Some((key, value)) = pair.split_once('=') else { continue };
-                let value = decode_component(value);
-                match key {
-                    "code" => code = Some(value),
-                    "state" => state = Some(value),
-                    "error" => error = Some(value),
-                    _ => {}
-                }
-            }
-
-            if let Some(e) = error {
-                return Err(if e == "access_denied" {
-                    "Sign-in was declined.".to_string()
-                } else {
-                    format!("Google reported: {e}")
-                });
-            }
-            if state.as_deref() != Some(expected_state) {
-                return Err("The reply from Google did not match this sign-in attempt.".into());
-            }
-            return code.ok_or_else(|| "Google's reply carried no authorization code.".to_string());
-        }
-
-        if SystemTime::now() > deadline {
-            return Err("Google did not answer within three minutes. Try again.".into());
-        }
-        std::thread::sleep(Duration::from_millis(300));
-    }
 }
 
 /// Keep what the sign-in returned. Sealed, because the refresh token is standing
@@ -447,6 +395,45 @@ fn wait_for_code(listener: TcpListener, expected_state: &str) -> Result<String, 
     }
 }
 
+/// The authorization code out of a redirect's query string.
+///
+/// `None` means the request was not the redirect at all. A browser opens sockets
+/// of its own accord — speculative connections, a favicon fetch — and treating
+/// the first one as the answer leaves the real redirect with nothing listening,
+/// which looks to the user like a network failure.
+fn code_from_query(query: &str, expected_state: &str) -> Option<Result<String, String>> {
+    let mut code = None;
+    let mut state = None;
+    let mut error = None;
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else { continue };
+        let value = decode_component(value);
+        match key {
+            "code" => code = Some(value),
+            "state" => state = Some(value),
+            "error" => error = Some(value),
+            _ => {}
+        }
+    }
+
+    if code.is_none() && error.is_none() {
+        return None;
+    }
+
+    Some(if let Some(e) = error.as_deref() {
+        Err(if e == "access_denied" {
+            "Sign-in was declined.".to_string()
+        } else {
+            format!("Google reported: {e}")
+        })
+    } else if state.as_deref() != Some(expected_state) {
+        // Something other than the browser window we opened answered.
+        Err("The reply from Google did not match this sign-in attempt.".to_string())
+    } else {
+        code.ok_or_else(|| "Google's reply carried no authorization code.".to_string())
+    })
+}
+
 /// Whether a request was the redirect, or just browser noise.
 enum Outcome {
     Answer(Result<String, String>),
@@ -467,41 +454,11 @@ fn handle_redirect(mut stream: std::net::TcpStream, expected_state: &str) -> Out
     let target = request_line.split_whitespace().nth(1).unwrap_or_default();
     let query = target.split_once('?').map(|(_, q)| q).unwrap_or_default();
 
-    let mut code = None;
-    let mut state = None;
-    let mut error = None;
-    for pair in query.split('&') {
-        let Some((key, value)) = pair.split_once('=') else { continue };
-        let value = decode_component(value);
-        match key {
-            "code" => code = Some(value),
-            "state" => state = Some(value),
-            "error" => error = Some(value),
-            _ => {}
-        }
-    }
-
-    // Neither an answer nor an error: something the browser asked for on its own.
-    if code.is_none() && error.is_none() {
-        let _ = write!(stream, "HTTP/1.1 204 No Content
-Connection: close
-
-");
+    let Some(outcome) = code_from_query(query, expected_state) else {
+        // Neither an answer nor an error: something the browser asked for on its own.
+        let _ = write!(stream, "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
         let _ = stream.flush();
         return Outcome::NotItYet;
-    }
-
-    let outcome = if let Some(e) = error.as_deref() {
-        Err(if e == "access_denied" {
-            "Sign-in was declined.".to_string()
-        } else {
-            format!("Google reported: {e}")
-        })
-    } else if state.as_deref() != Some(expected_state) {
-        // Something other than the browser window we opened answered.
-        Err("The reply from Google did not match this sign-in attempt.".to_string())
-    } else {
-        code.ok_or_else(|| "Google's reply carried no authorization code.".to_string())
     };
 
     let page = match &outcome {
@@ -672,6 +629,34 @@ mod tests {
         assert_eq!(percent_encode("http://127.0.0.1:1234"), "http%3A%2F%2F127.0.0.1%3A1234");
         assert_eq!(percent_encode("a b&c=d"), "a%20b%26c%3Dd");
         assert_eq!(percent_encode("-_.~"), "-_.~", "unreserved characters stay as they are");
+    }
+
+    #[test]
+    fn browser_noise_is_not_mistaken_for_the_answer() {
+        // A browser opens sockets nobody asked for. Treating the first as the
+        // redirect leaves the real one with nothing listening, which is what made
+        // the phone sign-in hang while the code sat unclaimed.
+        assert!(code_from_query("", "st").is_none());
+        assert!(code_from_query("favicon=1", "st").is_none());
+    }
+
+    #[test]
+    fn a_redirect_from_a_different_sign_in_is_refused() {
+        let out = code_from_query("code=abc&state=somebody-else", "mine").unwrap();
+        assert!(out.unwrap_err().contains("did not match"));
+    }
+
+    #[test]
+    fn a_declined_sign_in_says_so_plainly() {
+        let out = code_from_query("error=access_denied&state=st", "st").unwrap();
+        assert_eq!(out.unwrap_err(), "Sign-in was declined.");
+    }
+
+    #[test]
+    fn the_code_comes_back_decoded() {
+        // Google's codes contain a slash, which arrives percent-encoded.
+        let out = code_from_query("code=4%2F0Axyz&state=st", "st").unwrap();
+        assert_eq!(out.unwrap(), "4/0Axyz");
     }
 
     #[test]

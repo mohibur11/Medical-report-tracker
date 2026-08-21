@@ -12,6 +12,7 @@ import {
 import { describe as describeDocument, type Suggestion } from '../../src/lib/extract/lexicon.ts';
 import {
   commitItem,
+  discardStaged,
   runOcr,
   setDocumentCategories,
   stagedThumb,
@@ -35,12 +36,15 @@ export function ReviewCard({
   patients,
   categories,
   onDone,
+  onRemoved,
   onError,
 }: {
   item: IngestItem;
   patients: Patient[];
   categories: Category[];
   onDone: () => void;
+  /** Reports the name it went under, so the screen can say what disappeared. */
+  onRemoved: (fileName: string) => void;
   onError: (e: string) => void;
 }) {
   const [thumb, setThumb] = useState<string | null>(null);
@@ -56,6 +60,8 @@ export function ReviewCard({
   const [busy, setBusy] = useState(false);
   const [password, setPassword] = useState('');
   const [preview, setPreview] = useState(false);
+  /** Removal asks twice. A thumb-sized button next to Save gets hit by accident. */
+  const [confirming, setConfirming] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -126,6 +132,16 @@ export function ReviewCard({
     }
   }
 
+  async function remove() {
+    setBusy(true);
+    try {
+      onRemoved(await discardStaged(item.id));
+    } catch (e) {
+      onError(String(e));
+      setBusy(false);
+    }
+  }
+
   async function unlock() {
     setBusy(true);
     try {
@@ -165,6 +181,13 @@ export function ReviewCard({
         >
           {busy ? 'Unlocking…' : 'Unlock'}
         </button>
+        <RemoveButton
+          confirming={confirming}
+          busy={busy}
+          onAsk={() => setConfirming(true)}
+          onCancel={() => setConfirming(false)}
+          onConfirm={() => void remove()}
+        />
       </div>
     );
   }
@@ -337,7 +360,72 @@ export function ReviewCard({
             'Save'
           )}
         </button>
+
+        <RemoveButton
+          confirming={confirming}
+          busy={busy}
+          onAsk={() => setConfirming(true)}
+          onCancel={() => setConfirming(false)}
+          onConfirm={() => void remove()}
+        />
       </div>
+    </div>
+  );
+}
+
+/**
+ * Getting rid of something added by mistake.
+ *
+ * Two taps, and the second one is the destructive one. The photo behind this is
+ * still in the phone's gallery — only the app's copy goes — but a queue that
+ * silently loses a card under a thumb would be worse than one you cannot clear.
+ */
+function RemoveButton({
+  confirming,
+  busy,
+  onAsk,
+  onCancel,
+  onConfirm,
+}: {
+  confirming: boolean;
+  busy: boolean;
+  onAsk: () => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  if (!confirming) {
+    return (
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onAsk}
+        className="h-11 w-full rounded-xl text-sm text-slate-500 active:bg-slate-100 disabled:opacity-50 dark:text-slate-400 dark:active:bg-slate-800"
+      >
+        Remove this file
+      </button>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-2 rounded-xl bg-red-50 p-2 dark:bg-red-950/50">
+      <p className="flex-1 pl-1 text-xs text-red-800 dark:text-red-200">
+        Take it out of the queue?
+      </p>
+      <button
+        type="button"
+        onClick={onCancel}
+        className="h-10 rounded-lg px-3 text-sm text-slate-600 dark:text-slate-300"
+      >
+        Keep
+      </button>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onConfirm}
+        className="h-10 rounded-lg bg-red-600 px-4 text-sm font-medium text-white disabled:opacity-60"
+      >
+        Remove
+      </button>
     </div>
   );
 }

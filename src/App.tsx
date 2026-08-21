@@ -13,6 +13,7 @@ import { LibraryList } from './components/LibraryList.tsx';
 import { IDLE_LOCK_MS, LockScreen, LockSettings } from './components/Lock.tsx';
 import { LockedRow } from './components/LockedRow.tsx';
 import { PatientsPanel } from './components/PatientsPanel.tsx';
+import { RemoveFromQueue } from './components/RemoveFromQueue.tsx';
 import { ReviewRow, type RowHandle } from './components/ReviewRow.tsx';
 import { Thumb } from './components/Thumb.tsx';
 import { TrashPanel } from './components/TrashPanel.tsx';
@@ -68,6 +69,8 @@ export default function App() {
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Names of files taken back out of the queue, newest first. */
+  const [removed, setRemoved] = useState<string[]>([]);
   const [lock, setLock] = useState<LockState>({ enabled: false, email: '' });
   const [locked, setLocked] = useState(false);
   /** Which library row is open for editing, if any. */
@@ -253,6 +256,18 @@ export default function App() {
     // backlog import.
     setLastPatientId(patientId);
     if (!bulkRunning.current) refresh();
+  }
+
+  /**
+   * A row left the queue without being filed.
+   *
+   * Dropped from the list here rather than waiting for a refresh: the backend has
+   * already deleted the row, so a reload would take it away anyway, and a queue
+   * that lags a click feels broken.
+   */
+  function onRemoved(id: string, fileName: string) {
+    setItems((prev) => prev.filter((i) => i.id !== id));
+    setRemoved((prev) => [fileName, ...prev].slice(0, 5));
   }
 
   const pending = items.filter((i) => i.status === 'needs_date' || i.status === 'pending');
@@ -531,7 +546,7 @@ The file is not deleted — it moves to the Trash folder inside your vault, and 
               </>
             )}
           </>
-        ) : items.length === 0 && filed.length === 0 ? (
+        ) : items.length === 0 && filed.length === 0 && removed.length === 0 ? (
           <div className="flex h-full items-center justify-center">
             <div className="text-center">
               <p className="text-sm text-slate-500 dark:text-slate-400">
@@ -550,7 +565,7 @@ The file is not deleted — it moves to the Trash folder inside your vault, and 
             {lockedPdfs.length > 0 && (
               <ul className="divide-y divide-amber-200 border-b border-amber-200 bg-amber-50/60 dark:divide-amber-900 dark:border-amber-900 dark:bg-amber-950/40">
                 {lockedPdfs.map((it) => (
-                  <LockedRow key={it.id} item={it} onUnlocked={refresh} />
+                  <LockedRow key={it.id} item={it} onUnlocked={refresh} onRemoved={onRemoved} />
                 ))}
               </ul>
             )}
@@ -584,6 +599,7 @@ The file is not deleted — it moves to the Trash folder inside your vault, and 
                     }
                     onRegister={registerRow}
                     onCommitted={onCommitted}
+                    onRemoved={onRemoved}
                   />
                 ))}
               </ul>
@@ -601,9 +617,31 @@ The file is not deleted — it moves to the Trash folder inside your vault, and 
                     <span className="shrink-0 rounded bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
                       {it.status === 'duplicate' ? 'Duplicate' : 'Skipped'}
                     </span>
+                    <RemoveFromQueue item={it} onRemoved={onRemoved} />
                   </li>
                 ))}
               </ul>
+            )}
+
+            {removed.length > 0 && (
+              <div className="border-t border-slate-200 px-6 py-3 dark:border-slate-800">
+                <h2 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Removed
+                </h2>
+                <ul className="mt-1.5 space-y-0.5">
+                  {removed.map((name) => (
+                    <li
+                      key={name}
+                      className="selectable truncate font-mono text-[11px] text-slate-400 line-through dark:text-slate-500"
+                    >
+                      {name}
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-500">
+                  Only this app's copy went. The files you added from are untouched.
+                </p>
+              </div>
             )}
 
             {filed.length > 0 && (

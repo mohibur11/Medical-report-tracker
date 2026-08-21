@@ -1,5 +1,6 @@
 import { useState } from 'react';
 
+import { RemoveFromQueue } from './RemoveFromQueue.tsx';
 import { Thumb } from './Thumb.tsx';
 import { unlockPdf, type IngestItem } from '../lib/ipc.ts';
 
@@ -11,7 +12,16 @@ import { unlockPdf, type IngestItem } from '../lib/ipc.ts';
  * date of birth or a phone number, and silently dropping those from an export is
  * exactly the kind of quiet loss this app exists to prevent.
  */
-export function LockedRow({ item, onUnlocked }: { item: IngestItem; onUnlocked: () => void }) {
+export function LockedRow({
+  item,
+  onUnlocked,
+  onRemoved,
+}: {
+  item: IngestItem;
+  onUnlocked: () => void;
+  /** A PDF whose password nobody has is exactly what somebody wants to drop. */
+  onRemoved: (id: string, fileName: string) => void;
+}) {
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -64,6 +74,7 @@ export function LockedRow({ item, onUnlocked }: { item: IngestItem; onUnlocked: 
           <span className="text-xs text-slate-500 dark:text-slate-400">
             Often a date of birth or a phone number.
           </span>
+          <RemoveFromQueue item={item} onRemoved={onRemoved} />
         </div>
 
         {error && <p className="mt-1 text-xs text-red-600 dark:text-red-400">{error}</p>}

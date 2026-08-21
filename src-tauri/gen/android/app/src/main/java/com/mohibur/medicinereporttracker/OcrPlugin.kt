@@ -13,6 +13,9 @@ import androidx.activity.result.ActivityResult
 import androidx.browser.customtabs.CustomTabsIntent
 import app.tauri.annotation.ActivityCallback
 import java.io.File
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.SocketTimeoutException
 import app.tauri.annotation.Command
 import app.tauri.annotation.InvokeArg
 import app.tauri.annotation.TauriPlugin
@@ -47,9 +50,26 @@ class OpenArgs {
  * against the words around them, so where a date sits on the page is part of
  * deciding whether it is the report's date or the patient's birthday.
  */
+/** HTTP wants its line endings exactly, and no browser is forgiving about it. */
+private const val CRLF = "\r\n"
+
+private const val DONE_PAGE =
+  "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>" +
+    "<body style='font:16px system-ui;padding:3rem;text-align:center'>" +
+    "<h2>Signed in</h2><p>Close this tab and go back to the app.</p>"
+
+/** Served to anything that is not the redirect, so the browser is never left hanging. */
+private const val WAIT_PAGE =
+  "<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'>" +
+    "<body style='font:16px system-ui;padding:3rem;text-align:center'>" +
+    "<p>Waiting for Google…</p>"
+
 @TauriPlugin
 class OcrPlugin(private val activity: Activity) : Plugin(activity) {
   private val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+
+  /** Open only between starting a sign-in and its answer arriving. */
+  private var loopback: ServerSocket? = null
 
   /**
    * Choose reports from the phone's storage.
@@ -59,6 +79,107 @@ class OcrPlugin(private val activity: Activity) : Plugin(activity) {
    * bytes are copied into the same inbox a shared file lands in, so both routes
    * end up in one place and go through one ingest.
    */
+  /**
+   * Listen for Google's answer to a sign-in, on this phone.
+   *
+   * The socket is opened here rather than in Rust. An identical listener written
+   * in Rust bound its port and then never accepted anything — the browser sat on
+   * the connection backlog until it gave up — and the sign-in hung four times
+   * over. Whatever the reason, the platform runs its own threads reliably, so
+   * this half lives on the platform's side of the line.
+   *
+   * Port 0 asks the system for a free one. Google accepts any port on loopback
+   * for a desktop client, which is why that client is the one used here: an
+   * Android client cannot be used against the browser authorization endpoint at
+   * all, and asking it to be produces `Error 400: invalid_request`.
+   */
+  @Command
+  fun startLoopback(invoke: Invoke) {
+    try {
+      runCatching { loopback?.close() }
+      // Backlog of one: exactly one browser is coming back.
+      val socket = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))
+      loopback = socket
+
+      val response = JSObject()
+      response.put("port", socket.localPort)
+      invoke.resolve(response)
+    } catch (e: Exception) {
+      invoke.reject(e.message ?: "cannot listen for Google's reply")
+    }
+  }
+
+  /**
+   * Wait for the redirect and hand back its query string.
+   *
+   * Accepts in a loop rather than once: a browser opens connections this app did
+   * not ask for — a favicon, a speculative pre-connect — and the first attempt
+   * treated one of those as the answer and stopped listening. Only a request
+   * carrying `code` or `error` ends it.
+   *
+   * Runs on its own thread, and resolves on the UI thread, because the answer
+   * takes as long as somebody takes to choose an account and press Allow.
+   */
+  @Command
+  fun awaitRedirect(invoke: Invoke) {
+    val socket = loopback
+    if (socket == null) {
+      invoke.reject("the sign-in was not started")
+      return
+    }
+
+    Thread {
+      try {
+        // The whole sign-in, not one connection: the person has to read a consent
+        // screen, and possibly type a password, before anything arrives.
+        socket.soTimeout = 180_000
+
+        var query: String? = null
+        while (query == null) {
+          socket.accept().use { client ->
+            val line = client.getInputStream().bufferedReader().readLine() ?: ""
+            // "GET /?code=...&state=... HTTP/1.1"
+            val target = line.split(' ').getOrNull(1) ?: ""
+            val found = target.substringAfter('?', "")
+            val done = found.contains("code=") || found.contains("error=")
+
+            val body = if (done) DONE_PAGE else WAIT_PAGE
+            val bytes = body.toByteArray(Charsets.UTF_8)
+            val head = listOf(
+              "HTTP/1.1 200 OK",
+              "Content-Type: text/html; charset=utf-8",
+              "Content-Length: ${bytes.size}",
+              "Connection: close",
+              "",
+              "",
+            ).joinToString(CRLF)
+
+            client.getOutputStream().apply {
+              write(head.toByteArray(Charsets.UTF_8))
+              write(bytes)
+              flush()
+            }
+
+            if (done) query = found
+          }
+        }
+
+        val response = JSObject()
+        response.put("query", query)
+        activity.runOnUiThread { invoke.resolve(response) }
+      } catch (e: SocketTimeoutException) {
+        activity.runOnUiThread {
+          invoke.reject("Google did not answer within three minutes. Try again.")
+        }
+      } catch (e: Exception) {
+        activity.runOnUiThread { invoke.reject(e.message ?: "the sign-in did not come back") }
+      } finally {
+        runCatching { socket.close() }
+        loopback = null
+      }
+    }.start()
+  }
+
   /**
    * Open the Google sign-in without leaving the app.
    *

@@ -443,6 +443,66 @@ pub fn unlock(
     Ok(())
 }
 
+/// Take a file back out of the queue.
+///
+/// The row is deleted rather than marked, because a staged file's hash blocks
+/// the same bytes from being staged again — and somebody removing a photo they
+/// added by mistake is quite likely to want to add a better photo of that same
+/// page straight afterwards. Nothing here can reach the vault: a row that has
+/// already become a document is refused, and only the staging copy is unlinked.
+/// The file the user picked from is never touched.
+pub fn discard(conn: &Connection, user_id: &str, ingest_id: &str) -> Result<String, String> {
+    let (src_path, staged_path, document_id): (String, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT src_path, staged_path, document_id FROM ingest_items
+              WHERE id = ?1 AND owner_user_id = ?2",
+            params![ingest_id, user_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(|_| "No such file in the queue.".to_string())?;
+
+    if document_id.is_some() {
+        return Err(
+            "That file has already been filed. Move it to the trash from the library instead."
+                .into(),
+        );
+    }
+
+    // The row goes first. A leftover file in staging costs disk space and nothing
+    // else; a row pointing at a file that is gone breaks filing later with an
+    // error that reads like corruption.
+    conn.execute("DELETE FROM ingest_items WHERE id = ?1", params![ingest_id])
+        .map_err(|e| format!("cannot remove from the queue: {e}"))?;
+
+    if let Some(staged) = staged_path {
+        remove_staging_files(Path::new(&staged), ingest_id);
+    }
+
+    Ok(Path::new(&src_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or(src_path))
+}
+
+/// Every derivative belonging to one staged item.
+///
+/// Staging names everything after the item's ULID — `<id>.jpg`, `<id>.thumb.jpg`,
+/// `<id>.page1` — so sweeping that prefix catches all of it without this having
+/// to keep a list of what each stage happened to write. A ULID is fixed-width, so
+/// one item's prefix cannot match another's.
+fn remove_staging_files(staged: &Path, ingest_id: &str) {
+    let _ = std::fs::remove_file(staged);
+
+    let Some(dir) = staged.parent() else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let prefix = format!("{ingest_id}.");
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn persist(
     conn: &Connection,
     user_id: &str,
@@ -991,5 +1051,83 @@ mod tests {
             .unwrap();
         assert_eq!(status, "needs_date");
         assert!(staged.is_some(), "staged path must persist so a crash can resume");
+    }
+
+    #[test]
+    fn removing_a_queued_file_takes_its_derivatives_with_it() {
+        let f = Fixture::new("discard");
+        let src = f.write("wrong-page.jpg", &jpeg_with_orientation(300, 200, 1));
+        let it = f.stage(&[src.clone()])[0].id.clone();
+
+        let staged = f.staging().join(format!("{it}.jpg"));
+        let thumb = f.staging().join(format!("{it}.thumb.jpg"));
+        assert!(staged.exists() && thumb.exists());
+
+        let name = discard(&f.conn, &f.user, &it).unwrap();
+        assert_eq!(name, "wrong-page.jpg", "the toast names the file the user chose");
+
+        assert!(!staged.exists(), "the staged copy must go");
+        assert!(!thumb.exists(), "and so must the thumbnail");
+        assert!(list_staged(&f.conn, &f.user).unwrap().is_empty());
+        // The file it was made from belongs to the user, not to this app.
+        assert!(Path::new(&src).exists(), "the original must be left alone");
+    }
+
+    #[test]
+    fn a_removed_file_can_be_added_again() {
+        // The point of deleting the row rather than marking it: the hash of a
+        // staged file blocks the same bytes, and a mistaken removal is usually
+        // followed by adding the right version of the same page.
+        let f = Fixture::new("discard-readd");
+        let src = f.write("again.jpg", &jpeg_with_orientation(300, 200, 1));
+
+        let first = f.stage(&[src.clone()])[0].id.clone();
+        discard(&f.conn, &f.user, &first).unwrap();
+
+        let second = &f.stage(&[src])[0];
+        assert_eq!(
+            second.status,
+            IngestStatus::NeedsDate,
+            "re-adding must not come back as a duplicate of the row that was removed"
+        );
+    }
+
+    #[test]
+    fn a_filed_document_cannot_be_removed_from_the_queue() {
+        let f = Fixture::new("discard-committed");
+        let src = f.write("filed.jpg", &jpeg_with_orientation(300, 200, 1));
+        let it = f.stage(&[src])[0].id.clone();
+
+        // A real document row, because ingest_items.document_id is a foreign key —
+        // faking it with a bare string tests nothing the app can actually produce.
+        let patient = crate::patients::create(&f.conn, &f.user, "Someone", None).unwrap();
+        f.conn
+            .execute(
+                "INSERT INTO documents
+                   (id, owner_user_id, patient_id, doc_date, date_source, title, doc_type,
+                    page_count, rel_path, sha256, byte_size, file_kind, created_at, updated_at)
+                 VALUES ('doc', ?1, ?2, '2026-01-01', 'manual', 'X', 'report',
+                         1, 'x.jpg', 'sha', 1, 'jpeg', datetime('now'), datetime('now'))",
+                params![f.user, patient.id],
+            )
+            .unwrap();
+        f.conn
+            .execute(
+                "UPDATE ingest_items SET status = 'committed', document_id = 'doc' WHERE id = ?1",
+                params![it],
+            )
+            .unwrap();
+
+        let err = discard(&f.conn, &f.user, &it).unwrap_err();
+        assert!(err.contains("already been filed"), "{err}");
+        // Refusing must not have taken the file with it on the way out.
+        assert!(f.staging().join(format!("{it}.jpg")).exists());
+    }
+
+    #[test]
+    fn removing_something_that_is_not_queued_says_so() {
+        let f = Fixture::new("discard-missing");
+        let err = discard(&f.conn, &f.user, "01ARZ3NDEKTSV4RRFFQ69G5FAV").unwrap_err();
+        assert!(err.contains("No such file"), "{err}");
     }
 }

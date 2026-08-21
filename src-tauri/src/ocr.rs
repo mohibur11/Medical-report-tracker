@@ -159,6 +159,50 @@ pub fn recognize(path: &std::path::Path) -> Result<OcrPage, String> {
         .map_err(|e| format!("cannot read this page: {e}"))
 }
 
+/// Open a socket on loopback for Google's answer, and report the port.
+///
+/// The listener lives on the Kotlin side. The same thing written in Rust bound
+/// its port and then never accepted a connection, and the sign-in hung with it —
+/// four times, through three different explanations. The platform schedules its
+/// own threads reliably, so this half was moved to where that is guaranteed.
+#[cfg(target_os = "android")]
+pub fn start_loopback() -> Result<u16, String> {
+    #[derive(serde::Deserialize)]
+    struct Port {
+        port: u16,
+    }
+
+    let handle = ANDROID_OCR
+        .get()
+        .ok_or("the sign-in was not available when the app started")?;
+
+    handle
+        .run_mobile_plugin::<Port>("startLoopback", ())
+        .map(|p| p.port)
+        .map_err(|e| format!("cannot listen for Google's reply: {e}"))
+}
+
+/// Block until the browser comes back, and return the query string it carried.
+///
+/// Blocks for as long as somebody takes to choose an account and press Allow, so
+/// the caller must already be off the UI thread.
+#[cfg(target_os = "android")]
+pub fn await_redirect() -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    struct Reply {
+        query: String,
+    }
+
+    let handle = ANDROID_OCR
+        .get()
+        .ok_or("the sign-in was not available when the app started")?;
+
+    handle
+        .run_mobile_plugin::<Reply>("awaitRedirect", ())
+        .map(|r| r.query)
+        .map_err(|e| format!("{e}"))
+}
+
 /// Open a URL in a tab inside this app.
 ///
 /// Used for the Google sign-in, which must not send the app to the background:

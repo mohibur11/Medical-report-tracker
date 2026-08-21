@@ -2,6 +2,7 @@ import { useState } from 'react';
 
 import { ReviewCard } from './ReviewCard.tsx';
 import {
+  discardStaged,
   pickAndImport,
   type Category,
   type IngestItem,
@@ -31,25 +32,51 @@ export function Capture({
   onNeedPeople: () => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  /**
+   * Files that were refused on the way in.
+   *
+   * Held here rather than read back from the queue: the review queue only lists
+   * what can still be reviewed, so a HEIC or a duplicate used to vanish without
+   * ever saying why — the button simply appeared to do nothing.
+   */
+  const [skipped, setSkipped] = useState<IngestItem[]>([]);
 
   const waiting = items.filter(
     (i) => i.status === 'needs_date' || i.status === 'pending' || i.status === 'locked',
   );
-  const rejected = items.filter((i) => i.status === 'failed' || i.status === 'duplicate');
+  const rejected = skipped.filter((s) => !items.some((i) => i.id === s.id));
 
   async function add() {
     setBusy(true);
+    setNote(null);
     try {
       // Goes through the phone's own picker rather than the desktop dialog: that
       // one hands back a content:// URI, which the backend cannot open, so the
       // button appeared to work and imported nothing.
       const staged = await pickAndImport();
-      if (staged.length > 0) onChanged();
-      else onError('Nothing was added. If you chose a file, tell me — that is a bug.');
+      const bad = staged.filter((i) => i.status === 'failed' || i.status === 'duplicate');
+      if (bad.length > 0) {
+        setSkipped((prev) => [...bad, ...prev.filter((p) => !bad.some((b) => b.id === p.id))]);
+      }
+      if (staged.length > bad.length) onChanged();
+      else if (staged.length === 0) {
+        onError('Nothing was added. If you chose a file, tell me — that is a bug.');
+      }
     } catch (e) {
       onError(String(e));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function dismiss(item: IngestItem) {
+    setSkipped((prev) => prev.filter((s) => s.id !== item.id));
+    try {
+      await discardStaged(item.id);
+    } catch {
+      // Nothing to say. The row is already off the screen, and what is left
+      // behind is a database row that lists nowhere.
     }
   }
 
@@ -97,6 +124,16 @@ export function Capture({
         )}
       </button>
 
+      {note && (
+        <button
+          type="button"
+          onClick={() => setNote(null)}
+          className="mt-3 w-full rounded-xl bg-slate-100 px-3 py-2 text-left text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+        >
+          {note} <span className="opacity-60">Tap to dismiss.</span>
+        </button>
+      )}
+
       {waiting.length > 0 && (
         <>
           <h2 className="mt-6 text-xs font-semibold uppercase tracking-wide text-slate-500">
@@ -110,6 +147,10 @@ export function Capture({
                 patients={patients}
                 categories={categories}
                 onDone={onChanged}
+                onRemoved={(fileName) => {
+                  setNote(`Removed ${fileName}.`);
+                  onChanged();
+                }}
                 onError={onError}
               />
             ))}
@@ -126,12 +167,22 @@ export function Capture({
             {rejected.map((item) => (
               <li
                 key={item.id}
-                className="rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900"
+                className="flex items-start gap-2 rounded-xl border border-slate-200 bg-white p-3 dark:border-slate-800 dark:bg-slate-900"
               >
-                <p className="selectable truncate text-sm">{item.fileName}</p>
-                <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
-                  {item.status === 'duplicate' ? 'Already added' : item.error}
-                </p>
+                <div className="min-w-0 flex-1">
+                  <p className="selectable truncate text-sm">{item.fileName}</p>
+                  <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                    {item.status === 'duplicate' ? 'Already added' : item.error}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void dismiss(item)}
+                  aria-label={`Dismiss ${item.fileName}`}
+                  className="-m-1 size-9 shrink-0 rounded-lg text-slate-400 active:bg-slate-100 dark:active:bg-slate-800"
+                >
+                  ✕
+                </button>
               </li>
             ))}
           </ul>

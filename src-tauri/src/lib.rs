@@ -211,6 +211,21 @@ fn list_staged(state: State<'_, Db>, user: State<'_, CurrentUser>) -> Result<Vec
     ingest::list_staged(&conn, &user.0)
 }
 
+/// Take a file back out of the review queue.
+///
+/// Adding the wrong photo is an ordinary mistake, and until now the only way out
+/// of it was to file the thing and then trash it — which put a document nobody
+/// wanted into the vault on the way past.
+#[tauri::command]
+fn discard_staged(
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+    id: String,
+) -> Result<String, String> {
+    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    ingest::discard(&conn, &user.0, &id)
+}
+
 /// Rename a patient, or correct their date of birth.
 ///
 /// Renaming moves every one of their files, so this is not the cheap operation
@@ -582,20 +597,11 @@ async fn connect_google(
     // The database lock is taken twice, briefly, and never while the browser is
     // open: signing in takes as long as the person takes, and holding it would
     // freeze every other part of the app until they finished.
+    // The same desktop OAuth client on both platforms. Google accepts a loopback
+    // redirect from one anywhere, including from a browser on a phone.
     let (client_id, client_secret) = {
-        // Android signs in with the client compiled into the app, because the
-        // redirect scheme derived from it is declared in the manifest and the two
-        // cannot be allowed to disagree.
-        #[cfg(target_os = "android")]
-        {
-            (String::new(), String::new())
-        }
-
-        #[cfg(not(target_os = "android"))]
-        {
-            let conn = state.0.lock().map_err(|e| e.to_string())?;
-            google::client_credentials(&conn)?
-        }
+        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        google::client_credentials(&conn)?
     };
 
     // The browser is opened through the opener plugin, which knows how to do it
@@ -1095,6 +1101,7 @@ pub fn run() {
             db_health,
             import_files,
             list_staged,
+            discard_staged,
             take_shared,
             pick_and_import,
             staged_pdf_text_source,

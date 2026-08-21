@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 
+import { RemoveFromQueue } from './RemoveFromQueue.tsx';
 import { Thumb } from './Thumb.tsx';
 import { detectConflicts, isBlocked, type Conflict } from '../lib/extract/conflicts.ts';
 import { formatDmy, parseDmyInput, rankDateCandidates, type DateCandidate } from '../lib/extract/dates.ts';
@@ -51,6 +52,7 @@ export function ReviewRow({
   onToggle,
   onRegister,
   onCommitted,
+  onRemoved,
 }: {
   item: IngestItem;
   patients: Patient[];
@@ -62,6 +64,8 @@ export function ReviewRow({
   /** Reports the chosen patient so the next row can default to it — a backlog
    *  import is almost always one person at a time. */
   onCommitted: (id: string, fileName: string, patientId: string) => void;
+  /** The row was taken out of the queue rather than filed. */
+  onRemoved: (id: string, fileName: string) => void;
 }) {
   const [date, setDate] = useState('');
   const [title, setTitle] = useState('');
@@ -307,6 +311,7 @@ export function ReviewRow({
           >
             {busy ? 'Filing…' : 'File'}
           </button>
+          <RemoveFromQueue item={item} onRemoved={onRemoved} />
         </div>
 
         {(reading || candidates.length > 0) && (

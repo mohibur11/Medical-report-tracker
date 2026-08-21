@@ -61,6 +61,14 @@ the difference is entirely symbols. If an APK comes out unexpectedly large, clea
 repackage: Gradle can leave stale data inside the archive, producing a 216 MB
 file whose contents measure 42 MB.
 
+## Removing something added by mistake
+
+Every card in the review queue has **Remove this file**, and it asks twice. It
+deletes the app's staged copy and its thumbnail, and the row with them — the
+photo in the gallery is untouched. The row goes rather than being marked, because
+a staged file's hash blocks the same bytes from being added again, and somebody
+removing a bad photo of a page usually wants to add a better one.
+
 ## Sharing a report to the app
 
 The app appears in Android's share sheet for images and PDFs. Sharing one copies
@@ -97,18 +105,27 @@ refuses it. Expect a Play Protect warning about an unknown developer.
   does, so every call failed with "error sending request" — including the token
   exchange, long after the sign-in itself had succeeded. The build uses
   `rustls-tls-webpki-roots` instead.
-- **The sign-in must open inside the app.** Handing the URL to the system browser
-  sends this app to the background, Android freezes the cached process, and the
-  loopback listener waiting for Google's redirect stops accepting — the browser
-  reports ERR_NETWORK_CHANGED against a `127.0.0.1` URL that carries a perfectly
-  good authorization code. A Custom Tab runs in this app's own task, so the
-  process stays awake and the listener keeps running.
-- **Google Drive sign-in reaches the token exchange.** The loopback listener
-  binds inside the app and the browser on the same phone can reach it, so the
-  desktop OAuth client is reused as-is. Opening the browser goes through the
-  opener plugin rather than the Windows-only call it used before. Whether Chrome
-  Custom Tabs will follow a `http://127.0.0.1:PORT` redirect back to the app has
-  not been tested on a device.
+- **The sign-in listener is Kotlin, and that is deliberate.** The phone uses the
+  same **desktop** OAuth client as Windows, the same PKCE, and the same
+  `http://127.0.0.1:PORT` redirect. Only the socket is different: `startLoopback`
+  and `awaitRedirect` in `OcrPlugin.kt` open it and accept on their own thread.
+  An identical listener written in Rust bound its port and then never accepted
+  the connection — the browser sat on the backlog until it timed out, and the
+  sign-in hung, four times, through three wrong explanations. Whatever the cause,
+  the platform schedules its own threads reliably.
+- **Do not use an Android OAuth client here.** One was registered and tried, with
+  a `com.googleusercontent.apps.*` redirect scheme claimed in the manifest.
+  Google refuses an Android client at the browser authorization endpoint
+  outright: `Error 400: invalid_request`, before the consent screen appears.
+  Android client IDs exist for the native sign-in libraries, not for this flow.
+  The client can be deleted from the Cloud console.
+- **The sign-in must still open inside the app.** Handing the URL to the system
+  browser sends this app to the background and Android freezes cached processes.
+  A Custom Tab runs in this app's own task, so the process stays awake and the
+  listener keeps accepting.
+- **Whether it now completes on a device is untested.** It compiles, packages and
+  is reachable in principle; nobody has yet watched a phone come back from
+  Google with a code.
 - **The refresh token is not encrypted on Android.** On Windows DPAPI protects one
   row in a database that anyone with the user's files can read. Android does not
   have that problem — the database is in internal app storage, which no other app
