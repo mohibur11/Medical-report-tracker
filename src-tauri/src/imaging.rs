@@ -125,7 +125,16 @@ pub fn derive(bytes: &[u8], format: ImageFormat) -> Result<Derivatives, String> 
 
     let img = bake_orientation(img, orientation);
 
-    let print = downscale(&img, PRINT_LONG_EDGE, image::imageops::FilterType::Lanczos3);
+    // Lanczos is worth its cost on a desktop, where this runs once per file on a
+    // machine with power to spare. On a phone it is the single slowest step of an
+    // import, on a battery, while somebody watches a spinner — and at these
+    // reductions the visible difference on a photographed document is nil.
+    #[cfg(target_os = "android")]
+    let print_filter = image::imageops::FilterType::Triangle;
+    #[cfg(not(target_os = "android"))]
+    let print_filter = image::imageops::FilterType::Lanczos3;
+
+    let print = downscale(&img, PRINT_LONG_EDGE, print_filter);
     let thumb = downscale(&img, THUMB_LONG_EDGE, image::imageops::FilterType::Triangle);
 
     Ok(Derivatives {

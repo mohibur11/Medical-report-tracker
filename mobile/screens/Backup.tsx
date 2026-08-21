@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 
+import { Spinner } from './Capture.tsx';
 import {
   backupToDrive,
   connectGoogle,
@@ -80,7 +81,14 @@ export function Backup({ onError }: { onError: (e: string) => void }) {
               onClick={() => void run('in', connectGoogle)}
               className="mt-3 h-12 w-full rounded-xl bg-sky-600 text-base font-medium text-white disabled:bg-slate-300 dark:disabled:bg-slate-700"
             >
-              {busy === 'in' ? 'Waiting for Google…' : 'Choose a Google account'}
+              {busy === 'in' ? (
+                <span className="flex items-center justify-center gap-2">
+                  <Spinner small />
+                  Waiting for Google — finish in the browser
+                </span>
+              ) : (
+                'Choose a Google account'
+              )}
             </button>
           </>
         ) : (
@@ -143,7 +151,14 @@ export function Backup({ onError }: { onError: (e: string) => void }) {
           onClick={() => void run('up', backupToDrive)}
           className="h-12 w-full rounded-xl bg-sky-600 text-base font-medium text-white disabled:bg-slate-300 dark:disabled:bg-slate-700"
         >
-          {busy === 'up' ? 'Backing up…' : 'Back up now'}
+          {busy === 'up' ? (
+            <span className="flex items-center justify-center gap-2">
+              <Spinner small />
+              Backing up…
+            </span>
+          ) : (
+            'Back up now'
+          )}
         </button>
         <button
           type="button"

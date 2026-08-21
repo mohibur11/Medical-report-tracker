@@ -80,9 +80,21 @@ export function Capture({
         onClick={() => void add()}
         className="flex h-28 w-full flex-col items-center justify-center gap-1 rounded-2xl border-2 border-dashed border-sky-300 bg-sky-50 text-sky-800 active:bg-sky-100 disabled:opacity-60 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-200"
       >
-        <span className="text-3xl leading-none">＋</span>
-        <span className="text-sm font-medium">{busy ? 'Adding…' : 'Add a photo or PDF'}</span>
-        <span className="text-xs opacity-70">Straightened and de-duplicated automatically</span>
+        {busy ? (
+          <>
+            <Spinner />
+            <span className="text-sm font-medium">Adding…</span>
+            <span className="text-xs opacity-70">
+              Straightening and shrinking the photo — a large one takes a moment
+            </span>
+          </>
+        ) : (
+          <>
+            <span className="text-3xl leading-none">＋</span>
+            <span className="text-sm font-medium">Add a photo or PDF</span>
+            <span className="text-xs opacity-70">Straightened and de-duplicated automatically</span>
+          </>
+        )}
       </button>
 
       {waiting.length > 0 && (
@@ -132,5 +144,23 @@ export function Capture({
         </p>
       )}
     </div>
+  );
+}
+
+/**
+ * Something turning, so a slow import does not look like a dead button.
+ *
+ * Pure CSS rather than an image: it has to appear the instant the work starts,
+ * and the work is what would delay loading anything.
+ */
+export function Spinner({ small = false }: { small?: boolean }) {
+  return (
+    <span
+      role="progressbar"
+      aria-label="Working"
+      className={`inline-block animate-spin rounded-full border-2 border-current border-t-transparent ${
+        small ? 'size-4' : 'size-7'
+      }`}
+    />
   );
 }

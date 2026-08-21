@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 
+import { Spinner } from './Capture.tsx';
 import { detectConflicts, isBlocked, type Conflict } from '../../src/lib/extract/conflicts.ts';
 import {
   formatDmy,
@@ -191,7 +192,10 @@ export function ReviewCard({
             aria-label="Date"
           />
           {reading && (
-            <p className="mt-1 text-xs text-slate-400">reading the page…</p>
+            <p className="mt-1 flex items-center gap-2 text-xs text-slate-400">
+              <Spinner small />
+              reading the page…
+            </p>
           )}
         </div>
       </div>
@@ -313,7 +317,14 @@ export function ReviewCard({
           onClick={() => void save()}
           className="h-12 w-full rounded-xl bg-sky-600 text-base font-medium text-white active:bg-sky-700 disabled:bg-slate-300 dark:disabled:bg-slate-700"
         >
-          {busy ? 'Saving…' : 'Save'}
+          {busy ? (
+            <span className="flex items-center justify-center gap-2">
+              <Spinner small />
+              Saving…
+            </span>
+          ) : (
+            'Save'
+          )}
         </button>
       </div>
     </div>

@@ -288,7 +288,15 @@ fn wait_for_code(listener: TcpListener, expected_state: &str) -> Result<String, 
                 stream
                     .set_nonblocking(false)
                     .map_err(|e| format!("cannot read Google's reply: {e}"))?;
-                return handle_redirect(stream, expected_state);
+                // Keep listening until the request that actually carries the
+                // answer arrives. A browser opens sockets of its own accord —
+                // speculative connections, a favicon fetch — and answering the
+                // first one and stopping means the real redirect finds nothing
+                // listening, which looks to the user like a network failure.
+                match handle_redirect(stream, expected_state) {
+                    Outcome::Answer(result) => return result,
+                    Outcome::NotItYet => continue,
+                }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 if SystemTime::now() > deadline {
@@ -301,16 +309,21 @@ fn wait_for_code(listener: TcpListener, expected_state: &str) -> Result<String, 
     }
 }
 
-fn handle_redirect(mut stream: std::net::TcpStream, expected_state: &str) -> Result<String, String> {
-    let mut reader = BufReader::new(
-        stream
-            .try_clone()
-            .map_err(|e| format!("cannot read the reply: {e}"))?,
-    );
+/// Whether a request was the redirect, or just browser noise.
+enum Outcome {
+    Answer(Result<String, String>),
+    NotItYet,
+}
+
+fn handle_redirect(mut stream: std::net::TcpStream, expected_state: &str) -> Outcome {
+    let Ok(clone) = stream.try_clone() else {
+        return Outcome::NotItYet;
+    };
+    let mut reader = BufReader::new(clone);
     let mut request_line = String::new();
-    reader
-        .read_line(&mut request_line)
-        .map_err(|e| format!("cannot read the reply: {e}"))?;
+    if reader.read_line(&mut request_line).is_err() {
+        return Outcome::NotItYet;
+    }
 
     // "GET /?code=...&state=... HTTP/1.1"
     let target = request_line.split_whitespace().nth(1).unwrap_or_default();
@@ -328,6 +341,16 @@ fn handle_redirect(mut stream: std::net::TcpStream, expected_state: &str) -> Res
             "error" => error = Some(value),
             _ => {}
         }
+    }
+
+    // Neither an answer nor an error: something the browser asked for on its own.
+    if code.is_none() && error.is_none() {
+        let _ = write!(stream, "HTTP/1.1 204 No Content
+Connection: close
+
+");
+        let _ = stream.flush();
+        return Outcome::NotItYet;
     }
 
     let outcome = if let Some(e) = error.as_deref() {
@@ -359,7 +382,7 @@ fn handle_redirect(mut stream: std::net::TcpStream, expected_state: &str) -> Res
     );
     let _ = stream.flush();
 
-    outcome
+    Outcome::Answer(outcome)
 }
 
 fn decode_component(value: &str) -> String {
