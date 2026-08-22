@@ -284,7 +284,8 @@ fn delete_export_preset(
 /// Record that a preset was used, so the list stays ordered by habit.
 #[tauri::command]
 fn use_export_preset(state: State<'_, Db>, user: State<'_, CurrentUser>, id: String) {
-    if let conn = state.conn() {
+    {
+        let conn = state.conn();
         presets::touch(&conn, &user.0, &id);
     }
 }
@@ -1174,7 +1175,8 @@ pub fn run() {
                 let app = window.app_handle().clone();
 
                 if let (Ok(vault_root), Some(state)) = (paths::vault_root(&app), app.try_state::<Db>()) {
-                    if let conn = state.conn() {
+                    {
+        let conn = state.conn();
                         match backup::snapshot(&conn, &vault_root) {
                             Ok(p) => eprintln!("backup written to {}", p.display()),
                             Err(e) => eprintln!("backup failed: {e}"),

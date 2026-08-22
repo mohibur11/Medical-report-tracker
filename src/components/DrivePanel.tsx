@@ -148,6 +148,10 @@ export function DrivePanel({ onRestored }: { onRestored: () => void }) {
             {report.copied === 0
               ? `Already up to date — ${report.unchanged} file${report.unchanged === 1 ? '' : 's'} unchanged.`
               : `${report.copied} file${report.copied === 1 ? '' : 's'} copied (${mb(report.bytes)}), ${report.unchanged} already there.`}
+            {report.removed > 0 &&
+              ` ${report.removed} no longer in the library ${report.removed === 1 ? 'was' : 'were'} taken out of the backup.`}
+            {report.adopted > 0 &&
+              ` ${report.adopted} report${report.adopted === 1 ? '' : 's'} added back to the library.`}
           </p>
           {report.failed.length > 0 && (
             <div className="mt-1 text-amber-700 dark:text-amber-300">

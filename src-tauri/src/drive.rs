@@ -127,6 +127,66 @@ pub fn plan_uploads(conn: &Connection, vault_root: &Path) -> Result<Vec<Upload>,
     Ok(out)
 }
 
+/// Which uploaded files are no longer in the vault.
+///
+/// Pure, like `plan_uploads`, and for a better reason: this one decides what to
+/// delete out of somebody's only backup.
+///
+/// Only files this app recorded uploading are considered. Anything else in the
+/// Drive folder was put there by something else and is none of this app's
+/// business. And if the vault is empty the answer is always nothing — an empty
+/// vault is a fresh install or a wiped phone, not a library somebody cleared on
+/// purpose, and that is exactly when "Back up now" would otherwise destroy the
+/// last copy.
+pub fn plan_removals(conn: &Connection, vault_root: &Path) -> Result<Vec<String>, String> {
+    if !crate::sync::has_any_content(vault_root) {
+        return Ok(Vec::new());
+    }
+
+    let mut stmt = conn
+        .prepare("SELECT rel_path FROM drive_file WHERE is_folder = 0")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+
+    let mut gone = Vec::new();
+    for rel_path in rows.flatten() {
+        let local = vault_root.join(rel_path.replace('\\', "/"));
+        if !local.exists() {
+            gone.push(rel_path);
+        }
+    }
+    gone.sort();
+    Ok(gone)
+}
+
+/// Delete one file from Drive and forget it was ever uploaded.
+fn delete_remote(conn: &Connection, token: &str, rel_path: &str) -> Result<(), String> {
+    let file_id: String = conn
+        .query_row(
+            "SELECT file_id FROM drive_file WHERE rel_path = ?1",
+            params![rel_path],
+            |r| r.get(0),
+        )
+        .map_err(|e| format!("{rel_path} — {e}"))?;
+
+    let response = client()
+        .delete(format!("{FILES_ENDPOINT}/{file_id}"))
+        .bearer_auth(token)
+        .send()
+        .map_err(|e| format!("{rel_path} — cannot reach Google: {e}"))?;
+
+    // 404 means it is already gone, which is the state being asked for.
+    if !response.status().is_success() && response.status() != reqwest::StatusCode::NOT_FOUND {
+        return Err(format!("{rel_path} — Google refused to remove it: {}", response.status()));
+    }
+
+    conn.execute("DELETE FROM drive_file WHERE rel_path = ?1", params![rel_path])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn remember(
     conn: &Connection,
     rel_path: &str,
@@ -479,6 +539,7 @@ impl BackupTarget for DriveApiTarget<'_> {
 
         let mut report = SyncReport {
             adopted: 0,
+            removed: 0,
             location: self.describe(),
             unchanged: total.saturating_sub(planned.len()),
             ..Default::default()
@@ -495,6 +556,13 @@ impl BackupTarget for DriveApiTarget<'_> {
             }
         }
 
+        for rel_path in plan_removals(self.conn, vault_root)? {
+            match delete_remote(self.conn, &token, &rel_path) {
+                Ok(()) => report.removed += 1,
+                Err(e) => report.failed.push(e),
+            }
+        }
+
         Ok(report)
     }
 
@@ -507,6 +575,7 @@ impl BackupTarget for DriveApiTarget<'_> {
 
         let mut report = SyncReport {
             adopted: 0,
+            removed: 0,
             location: self.describe(),
             ..Default::default()
         };
@@ -598,6 +667,30 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn what_the_vault_no_longer_has_is_planned_for_removal() {
+        let f = Fx::new("removals");
+        f.write("Rahim-Uddin/2026/keep.jpg", b"keep");
+        f.write("Rahim-Uddin/2026/gone.jpg", b"gone");
+        remember(&f.conn, r"Rahim-Uddin\2026\keep.jpg", "id-keep", false, Some(4), Some(1)).unwrap();
+        remember(&f.conn, r"Rahim-Uddin\2026\gone.jpg", "id-gone", false, Some(4), Some(1)).unwrap();
+
+        std::fs::remove_file(f.vault().join("Rahim-Uddin/2026/gone.jpg")).unwrap();
+
+        let gone = plan_removals(&f.conn, &f.vault()).unwrap();
+        assert_eq!(gone, vec![r"Rahim-Uddin\2026\gone.jpg".to_string()]);
+    }
+
+    #[test]
+    fn an_empty_vault_plans_no_removals_at_all() {
+        // A wiped phone must not be able to delete the only copy of the library
+        // by pressing "Back up now" before "Restore".
+        let f = Fx::new("removals-guard");
+        remember(&f.conn, r"Rahim-Uddin\2026\one.jpg", "id-1", false, Some(1), Some(1)).unwrap();
+
+        assert!(plan_removals(&f.conn, &f.vault()).unwrap().is_empty());
     }
 
     #[test]

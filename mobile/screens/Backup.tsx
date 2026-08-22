@@ -276,6 +276,8 @@ export function Backup({ onError }: { onError: (e: string) => void }) {
             {report.copied === 0
               ? `Already up to date — ${report.unchanged} file${report.unchanged === 1 ? '' : 's'}.`
               : `${report.copied} file${report.copied === 1 ? '' : 's'} copied.`}
+            {report.removed > 0 &&
+              ` ${report.removed} old file${report.removed === 1 ? '' : 's'} removed from Drive.`}
             {report.adopted > 0 &&
               ` ${report.adopted} report${report.adopted === 1 ? '' : 's'} added back to the library.`}
           </p>

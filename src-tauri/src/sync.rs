@@ -38,6 +38,13 @@ pub struct SyncReport {
     pub unchanged: usize,
     pub bytes: u64,
     pub failed: Vec<String>,
+    /// Files taken out of the backup because they are no longer in the vault.
+    ///
+    /// A backup that only ever adds is not a copy of the library, it is a copy of
+    /// everything the library has ever contained: rename a person and both names
+    /// live in Drive forever, delete a report and it stays.
+    #[serde(default)]
+    pub removed: usize,
     /// Restored files that became documents again.
     ///
     /// Copying the files back is only half of a restore. The database is what
@@ -106,7 +113,10 @@ impl BackupTarget for FolderTarget {
         }
         std::fs::create_dir_all(&self.root)
             .map_err(|e| format!("cannot create {:?}: {e}", self.root))?;
-        copy_tree(vault_root, &self.root, self.describe())
+
+        let mut report = copy_tree(vault_root, &self.root, self.describe())?;
+        report.removed = prune_tree(vault_root, &self.root);
+        Ok(report)
     }
 
     fn pull(&self, vault_root: &Path) -> Result<SyncReport, String> {
@@ -122,6 +132,86 @@ impl BackupTarget for FolderTarget {
     }
 }
 
+/// Take out of the backup whatever is no longer in the vault.
+///
+/// Returns how many files went. Empty directories left behind by the removals go
+/// too, so a person renamed last month does not keep a folder in Drive forever.
+///
+/// Refuses to remove anything at all when the vault has nothing in it. That is
+/// not a library somebody emptied on purpose — it is a fresh install, or a phone
+/// whose storage was wiped, and it is the exact moment somebody would press
+/// "Back up now" and destroy the only copy they have left.
+fn prune_tree(vault_root: &Path, backup_root: &Path) -> usize {
+    if !has_any_content(vault_root) {
+        return 0;
+    }
+
+    let mut removed = 0;
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut stack = vec![backup_root.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+
+            if path.is_dir() {
+                // Never touched on the way in, so never touched on the way out.
+                if SKIP_DIRS.iter().any(|s| s.eq_ignore_ascii_case(&name)) {
+                    continue;
+                }
+                dirs.push(path.clone());
+                stack.push(path);
+                continue;
+            }
+
+            let Ok(rel) = path.strip_prefix(backup_root) else { continue };
+            if vault_root.join(rel).exists() {
+                continue;
+            }
+            if std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+
+    // Deepest first, so a folder emptied by the loop above can go with it.
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.components().count()));
+    for dir in dirs {
+        if !vault_root.join(dir.strip_prefix(backup_root).unwrap_or(&dir)).exists() {
+            let _ = std::fs::remove_dir(&dir); // Fails while it still holds anything.
+        }
+    }
+
+    removed
+}
+
+/// Is there anything in the vault worth calling a library?
+pub fn has_any_content(vault_root: &Path) -> bool {
+    let mut stack = vec![vault_root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if path.is_dir() {
+                if !SKIP_DIRS.iter().any(|s| s.eq_ignore_ascii_case(&name)) {
+                    stack.push(path);
+                }
+                continue;
+            }
+            // The snapshot alone is not content: a fresh install writes one before
+            // it has a single report in it.
+            if name.starts_with(crate::backup::SNAPSHOT_NAME) {
+                continue;
+            }
+            return true;
+        }
+    }
+    false
+}
+
 /// Copy everything under `from` into `to`, skipping what is already identical.
 ///
 /// "Identical" is same size and same modification time to the second. Hashing
@@ -131,6 +221,7 @@ impl BackupTarget for FolderTarget {
 fn copy_tree(from: &Path, to: &Path, location: String) -> Result<SyncReport, String> {
     let mut report = SyncReport {
         adopted: 0,
+        removed: 0,
         location,
         ..Default::default()
     };
@@ -287,6 +378,76 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn a_backup_stops_carrying_what_the_vault_no_longer_has() {
+        // Otherwise Drive holds every document the library has ever contained:
+        // rename a person and both names live there forever.
+        let f = Fx::new("prune");
+        f.write("Rahim-Uddin/2026/keep.jpg", b"keep");
+        f.write("Rahim-Uddin/2026/gone.jpg", b"gone");
+
+        let target = f.target();
+        target.push(&f.vault()).unwrap();
+        assert!(f.dir.join("drive/MedicineReportTracker/Rahim-Uddin/2026/gone.jpg").exists());
+
+        std::fs::remove_file(f.vault().join("Rahim-Uddin/2026/gone.jpg")).unwrap();
+        let report = target.push(&f.vault()).unwrap();
+
+        assert_eq!(report.removed, 1);
+        assert!(!f.dir.join("drive/MedicineReportTracker/Rahim-Uddin/2026/gone.jpg").exists());
+        assert!(f.dir.join("drive/MedicineReportTracker/Rahim-Uddin/2026/keep.jpg").exists());
+    }
+
+    #[test]
+    fn a_folder_nobody_has_reports_in_any_more_goes_too() {
+        let f = Fx::new("prune-dir");
+        f.write("Old-Name/2026/one.jpg", b"x");
+
+        let target = f.target();
+        target.push(&f.vault()).unwrap();
+
+        // What a rename looks like on disk: the whole folder moves.
+        std::fs::remove_dir_all(f.vault().join("Old-Name")).unwrap();
+        f.write("New-Name/2026/one.jpg", b"x");
+        target.push(&f.vault()).unwrap();
+
+        assert!(!f.dir.join("drive/MedicineReportTracker/Old-Name").exists(), "the old folder must not linger");
+        assert!(f.dir.join("drive/MedicineReportTracker/New-Name/2026/one.jpg").exists());
+    }
+
+    #[test]
+    fn an_empty_vault_never_empties_the_backup() {
+        // The whole point of the backup is the moment this protects: a fresh
+        // install, or a phone whose storage was wiped, and somebody pressing
+        // "Back up now" before they think to press Restore.
+        let f = Fx::new("prune-guard");
+        f.write("Rahim-Uddin/2026/only-copy.jpg", b"irreplaceable");
+
+        let target = f.target();
+        target.push(&f.vault()).unwrap();
+
+        std::fs::remove_dir_all(f.vault()).unwrap();
+        std::fs::create_dir_all(f.vault()).unwrap();
+
+        let report = target.push(&f.vault()).unwrap();
+        assert_eq!(report.removed, 0);
+        assert!(
+            f.dir.join("drive/MedicineReportTracker/Rahim-Uddin/2026/only-copy.jpg").exists(),
+            "an empty vault is a wiped phone, not a library somebody cleared"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_on_its_own_does_not_count_as_a_library() {
+        // A fresh install writes one of these before it holds a single report.
+        let f = Fx::new("snapshot-only");
+        f.write(&format!("{}", crate::backup::SNAPSHOT_NAME), b"db");
+        assert!(!has_any_content(&f.vault()));
+
+        f.write("Rahim-Uddin/2026/one.jpg", b"x");
+        assert!(has_any_content(&f.vault()));
     }
 
     #[test]

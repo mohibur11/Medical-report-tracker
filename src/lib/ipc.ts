@@ -296,6 +296,10 @@ export interface SyncReport {
   unchanged: number;
   bytes: number;
   failed: string[];
+  /** Taken out of the backup because the vault no longer has them. */
+  removed: number;
+  /** Restored files that became documents again. Only ever set by a restore. */
+  adopted: number;
 }
 
 export const driveStatus = (): Promise<DriveStatus> => invoke('drive_status');
