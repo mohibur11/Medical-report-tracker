@@ -1,6 +1,7 @@
 import { useState } from 'react';
 
 import { ReviewCard } from './ReviewCard.tsx';
+import { useBusy } from '../busy.tsx';
 import {
   discardStaged,
   pickAndImport,
@@ -41,6 +42,7 @@ export function Capture({
    * ever saying why — the button simply appeared to do nothing.
    */
   const [skipped, setSkipped] = useState<IngestItem[]>([]);
+  const busyGate = useBusy();
 
   const waiting = items.filter(
     (i) => i.status === 'needs_date' || i.status === 'pending' || i.status === 'locked',
@@ -54,7 +56,7 @@ export function Capture({
       // Goes through the phone's own picker rather than the desktop dialog: that
       // one hands back a content:// URI, which the backend cannot open, so the
       // button appeared to work and imported nothing.
-      const staged = await pickAndImport();
+      const staged = await busyGate.run('Adding your file…', pickAndImport);
       const bad = staged.filter((i) => i.status === 'failed' || i.status === 'duplicate');
       if (bad.length > 0) {
         setSkipped((prev) => [...bad, ...prev.filter((p) => !bad.some((b) => b.id === p.id))]);

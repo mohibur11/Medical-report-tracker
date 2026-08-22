@@ -31,3 +31,6 @@ dist-mobile/
 
 # Google OAuth client downloads. These belong on the machine, never in the repo.
 client_secret_*.json
+
+# Baked-in Google OAuth client. Local only — the repo must never carry one.
+src-tauri/google-client.env

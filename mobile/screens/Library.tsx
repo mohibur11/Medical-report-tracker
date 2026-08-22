@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 
+import { useBusy } from '../busy.tsx';
 import { formatDmy } from '../../src/lib/extract/dates.ts';
 import {
   searchDocuments,
@@ -28,6 +29,7 @@ export function Library({
   onChanged: () => void;
   onError: (e: string) => void;
 }) {
+  const busyGate = useBusy();
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('');
   const [hits, setHits] = useState<string[] | null>(null);
@@ -113,7 +115,9 @@ export function Library({
                       )
                     )
                       return;
-                    trashDocument(d.id).then(onChanged, (e: unknown) => onError(String(e)));
+                    busyGate
+                      .run('Moving to Trash…', () => trashDocument(d.id))
+                      .then(onChanged, (e: unknown) => onError(String(e)));
                   }}
                   className="size-10 shrink-0 rounded-lg text-lg text-slate-400 active:bg-red-50 active:text-red-600"
                 >

@@ -24,6 +24,20 @@ const MIGRATIONS: &[(i64, &str)] = &[
 
 pub struct Db(pub Mutex<Connection>);
 
+impl Db {
+    /// The connection, even after something went wrong holding it.
+    ///
+    /// A panic while the lock is held poisons it, and every later `lock()` fails
+    /// — which turned one failed restore into an app where nothing worked at all
+    /// until it was force-stopped. The panic is the bug to fix; refusing to hand
+    /// the connection out afterwards only adds a second one. SQLite rolls back an
+    /// unfinished transaction when its statement is dropped, so what is behind
+    /// the lock is a usable connection either way.
+    pub fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DbHealth {

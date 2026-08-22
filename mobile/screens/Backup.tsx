@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { Spinner } from './Capture.tsx';
+import { useBusy } from '../busy.tsx';
 import {
   backupToDrive,
   cancelGoogleSignin,
@@ -30,6 +31,7 @@ export function Backup({ onError }: { onError: (e: string) => void }) {
   const [clientId, setClientId] = useState('');
   const [clientSecret, setClientSecret] = useState('');
   const [pasted, setPasted] = useState('');
+  const busyGate = useBusy();
 
   const refresh = () => driveStatus().then(setStatus, (e: unknown) => onError(String(e)));
   useEffect(() => void refresh(), []);
@@ -44,11 +46,26 @@ export function Backup({ onError }: { onError: (e: string) => void }) {
     return () => document.removeEventListener('visibilitychange', look);
   }, []);
 
+  /** What each job is called while the app is held for it. */
+  const SAYING: Record<string, string> = {
+    up: 'Backing up to Google Drive…',
+    down: 'Restoring from Google Drive…',
+    in: 'Opening Google…',
+    out: 'Disconnecting…',
+    paste: 'Finishing the sign-in…',
+    save: 'Saving…',
+    check: 'Checking…',
+    cancel: 'Starting over…',
+  };
+
   async function run(what: string, fn: () => Promise<unknown>) {
     setBusy(what);
     setReport(null);
     try {
-      const result = await fn();
+      // Held over the whole app, not just this button. A backup is minutes of
+      // uploading, and a second job started against the same database while it
+      // runs is how one slow restore turned into every later action failing.
+      const result = await busyGate.run(SAYING[what] ?? 'Working…', fn);
       if (result && typeof result === 'object' && 'copied' in result) {
         setReport(result as SyncReport);
       }
@@ -259,6 +276,8 @@ export function Backup({ onError }: { onError: (e: string) => void }) {
             {report.copied === 0
               ? `Already up to date — ${report.unchanged} file${report.unchanged === 1 ? '' : 's'}.`
               : `${report.copied} file${report.copied === 1 ? '' : 's'} copied.`}
+            {report.adopted > 0 &&
+              ` ${report.adopted} report${report.adopted === 1 ? '' : 's'} added back to the library.`}
           </p>
         )}
       </div>

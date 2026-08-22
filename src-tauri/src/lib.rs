@@ -34,7 +34,7 @@ pub struct CurrentUser(pub String);
 
 #[tauri::command(async)]
 fn db_health(app: AppHandle, state: State<'_, Db>) -> Result<DbHealth, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     db::health(
         &conn,
         paths::db_path(&app)?.display().to_string(),
@@ -53,7 +53,7 @@ async fn import_files(
     paths_in: Vec<String>,
 ) -> Result<Vec<IngestItem>, String> {
     let staging = paths::staging_dir(&app)?;
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     ingest::stage_batch(&conn, &user.0, &staging, &paths_in)
 }
 
@@ -77,7 +77,7 @@ fn pick_and_import(
             .app_local_data_dir()
             .map_err(|e| format!("cannot resolve local app data folder: {e}"))?;
         let staging = paths::staging_dir(&app)?;
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        let conn = state.conn();
         return ingest::take_shared(&conn, &user.0, &local, &staging);
     }
 
@@ -104,7 +104,7 @@ fn take_shared(
         .app_local_data_dir()
         .map_err(|e| format!("cannot resolve local app data folder: {e}"))?;
     let staging = paths::staging_dir(&app)?;
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     ingest::take_shared(&conn, &user.0, &local, &staging)
 }
 
@@ -125,7 +125,7 @@ fn staged_preview(app: AppHandle, state: State<'_, Db>, id: String) -> Result<Op
     }
 
     let (staged, kind): (Option<String>, Option<String>) = {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        let conn = state.conn();
         conn.query_row(
             "SELECT staged_path, file_kind FROM ingest_items WHERE id = ?1",
             rusqlite::params![id],
@@ -162,7 +162,7 @@ fn unlock_pdf(
     ingest_id: String,
     password: String,
 ) -> Result<(), String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     ingest::unlock(&conn, &user.0, &ingest_id, &password)
 }
 
@@ -186,7 +186,7 @@ fn staged_pdf_text_source(
     const MAX_BYTES: u64 = 12 * 1024 * 1024;
 
     let staged: Option<String> = {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        let conn = state.conn();
         conn.query_row(
             "SELECT staged_path FROM ingest_items WHERE id = ?1 AND file_kind = 'pdf'",
             rusqlite::params![ingest_id],
@@ -207,7 +207,7 @@ fn staged_pdf_text_source(
 
 #[tauri::command]
 fn list_staged(state: State<'_, Db>, user: State<'_, CurrentUser>) -> Result<Vec<IngestItem>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     ingest::list_staged(&conn, &user.0)
 }
 
@@ -222,7 +222,7 @@ fn discard_staged(
     user: State<'_, CurrentUser>,
     id: String,
 ) -> Result<String, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     ingest::discard(&conn, &user.0, &id)
 }
 
@@ -240,7 +240,7 @@ fn rename_patient(
     dob: Option<String>,
 ) -> Result<vault::RenameReport, String> {
     let vault_root = paths::vault_root(&app)?;
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     vault::rename_patient(
         &conn,
         &user.0,
@@ -256,7 +256,7 @@ fn list_export_presets(
     state: State<'_, Db>,
     user: State<'_, CurrentUser>,
 ) -> Result<Vec<presets::ExportPreset>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     presets::list(&conn, &user.0)
 }
 
@@ -267,7 +267,7 @@ fn save_export_preset(
     name: String,
     preset: presets::ExportPreset,
 ) -> Result<presets::ExportPreset, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     presets::save(&conn, &user.0, &name, &preset)
 }
 
@@ -277,21 +277,21 @@ fn delete_export_preset(
     user: State<'_, CurrentUser>,
     id: String,
 ) -> Result<(), String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     presets::remove(&conn, &user.0, &id)
 }
 
 /// Record that a preset was used, so the list stays ordered by habit.
 #[tauri::command]
 fn use_export_preset(state: State<'_, Db>, user: State<'_, CurrentUser>, id: String) {
-    if let Ok(conn) = state.0.lock() {
+    if let conn = state.conn() {
         presets::touch(&conn, &user.0, &id);
     }
 }
 
 #[tauri::command]
 fn list_patients(state: State<'_, Db>, user: State<'_, CurrentUser>) -> Result<Vec<patients::Patient>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     patients::list(&conn, &user.0)
 }
 
@@ -302,7 +302,7 @@ fn create_patient(
     display_name: String,
     dob: Option<String>,
 ) -> Result<patients::Patient, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     patients::create(&conn, &user.0, &display_name, dob.as_deref())
 }
 
@@ -319,7 +319,7 @@ fn commit_item(
     doc_type: String,
 ) -> Result<vault::CommittedDocument, String> {
     let vault_root = paths::vault_root(&app)?;
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     vault::commit(
         &conn,
         &user.0,
@@ -343,7 +343,7 @@ async fn run_ocr(state: State<'_, Db>, ingest_id: String) -> Result<Vec<ocr::Ocr
     // rows at once, and every other command — list, commit, search — would sit
     // behind them.
     let target = {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        let conn = state.conn();
         ocr::staged_target(&conn, &ingest_id)?
     };
     if let Some(pages) = target.cached {
@@ -352,7 +352,7 @@ async fn run_ocr(state: State<'_, Db>, ingest_id: String) -> Result<Vec<ocr::Ocr
 
     let pages = ocr::recognize_file(&target.path, &target.kind)?;
 
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     ocr::store_ocr(&conn, &ingest_id, &pages)?;
     Ok(pages)
 }
@@ -371,7 +371,7 @@ struct LockState {
 
 #[tauri::command]
 fn lock_state(state: State<'_, Db>) -> Result<LockState, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     Ok(LockState {
         enabled: auth::is_enabled(&conn)?,
         email: auth::email(&conn).unwrap_or_default(),
@@ -380,7 +380,7 @@ fn lock_state(state: State<'_, Db>) -> Result<LockState, String> {
 
 #[tauri::command]
 fn unlock(state: State<'_, Db>, password: String) -> Result<bool, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     auth::verify(&conn, &password)
 }
 
@@ -391,7 +391,7 @@ fn set_password(
     email: String,
     password: String,
 ) -> Result<(), String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     auth::set_password(&conn, &user.0, &email, &password)
 }
 
@@ -402,7 +402,7 @@ fn change_password(
     current: String,
     next: String,
 ) -> Result<(), String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     auth::change_password(&conn, &user.0, &current, &next)
 }
 
@@ -412,7 +412,7 @@ fn disable_password(
     user: State<'_, CurrentUser>,
     current: String,
 ) -> Result<(), String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     auth::disable(&conn, &user.0, &current)
 }
 
@@ -431,7 +431,7 @@ fn update_document(
     notes: Option<String>,
 ) -> Result<vault::CommittedDocument, String> {
     let vault_root = paths::vault_root(&app)?;
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     vault::update(
         &conn,
         &user.0,
@@ -455,7 +455,7 @@ fn list_trashed(
     user: State<'_, CurrentUser>,
 ) -> Result<Vec<vault::TrashedDocument>, String> {
     let vault_root = paths::vault_root(&app)?;
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     vault::list_trashed(&conn, &user.0, &vault_root)
 }
 
@@ -468,7 +468,7 @@ fn restore_document(
     document_id: String,
 ) -> Result<(), String> {
     let vault_root = paths::vault_root(&app)?;
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     vault::restore(&conn, &user.0, &vault_root, &document_id)
 }
 
@@ -481,7 +481,7 @@ fn trash_document(
     document_id: String,
 ) -> Result<(), String> {
     let vault_root = paths::vault_root(&app)?;
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     vault::trash(&conn, &user.0, &vault_root, &document_id)
 }
 
@@ -519,7 +519,7 @@ fn drive_target(conn: &rusqlite::Connection) -> Option<sync::FolderTarget> {
 
 #[tauri::command]
 fn drive_status(state: State<'_, Db>) -> Result<DriveStatus, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     let chosen = db::setting(&conn, DRIVE_FOLDER);
     let suggestions: Vec<String> = sync::likely_drive_roots()
         .into_iter()
@@ -568,7 +568,7 @@ fn set_drive_folder(state: State<'_, Db>, folder: String) -> Result<(), String> 
     if !path.is_dir() {
         return Err(format!("{folder} is not a folder on this computer."));
     }
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     db::set_setting(&conn, DRIVE_FOLDER, &folder)
 }
 
@@ -583,7 +583,7 @@ fn set_google_client(
     client_id: String,
     client_secret: String,
 ) -> Result<google::Account, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     google::set_client(&conn, &client_id, &client_secret)?;
     Ok(google::account(&conn))
 }
@@ -605,7 +605,7 @@ async fn connect_google(
 ) -> Result<google::Account, String> {
     let port = ocr::start_loopback()?;
     let url = {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        let conn = state.conn();
         google::begin(&conn, &format!("http://127.0.0.1:{port}"))?
     };
 
@@ -619,13 +619,13 @@ async fn connect_google(
     tauri::async_runtime::spawn_blocking(move || {
         let Ok(answer) = ocr::await_redirect() else { return };
         let db = handle.state::<Db>();
-        let Ok(conn) = db.0.lock() else { return };
+        let conn = db.conn();
         if let Ok(tokens) = google::finish(&conn, &answer) {
             let _ = google::store(&conn, tokens);
         }
     });
 
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     Ok(google::account(&conn))
 }
 
@@ -636,19 +636,20 @@ async fn connect_google(
 /// *after* Google has already handed over the code. It is sitting in the address
 /// bar of the error page. This takes it from there.
 #[tauri::command]
-fn finish_google_signin(
-    state: State<'_, Db>,
-    answer: String,
-) -> Result<google::Account, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-    let tokens = google::finish(&conn, answer.trim())?;
-    google::store(&conn, tokens)
+async fn finish_google_signin(app: AppHandle, answer: String) -> Result<google::Account, String> {
+    off_thread(move || {
+        let db = app.state::<Db>();
+        let conn = db.conn();
+        let tokens = google::finish(&conn, answer.trim())?;
+        google::store(&conn, tokens)
+    })
+    .await
 }
 
 /// Abandon a sign-in that was started and never came back.
 #[tauri::command]
 fn cancel_google_signin(state: State<'_, Db>) -> Result<google::Account, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     google::cancel(&conn);
     Ok(google::account(&conn))
 }
@@ -663,7 +664,7 @@ async fn connect_google(
     // open: signing in takes as long as the person takes, and holding it would
     // freeze every other part of the app until they finished.
     let (client_id, client_secret) = {
-        let conn = state.0.lock().map_err(|e| e.to_string())?;
+        let conn = state.conn();
         google::client_credentials(&conn)?
     };
 
@@ -682,78 +683,103 @@ async fn connect_google(
     .await
     .map_err(|e| format!("the sign-in did not finish: {e}"))??;
 
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     google::store(&conn, tokens)
 }
 
 #[tauri::command]
-fn disconnect_google(state: State<'_, Db>) -> Result<google::Account, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
-    google::disconnect(&conn)?;
-    Ok(google::account(&conn))
+async fn disconnect_google(app: AppHandle) -> Result<google::Account, String> {
+    off_thread(move || {
+        let db = app.state::<Db>();
+        let conn = db.conn();
+        // Revoking talks to Google, so this belongs off the async runtime too.
+        google::disconnect(&conn)?;
+        Ok(google::account(&conn))
+    })
+    .await
+}
+
+/// Run something that talks to Google, on a thread allowed to block.
+///
+/// reqwest's blocking client owns a runtime of its own, and dropping a runtime
+/// inside an async task panics — which poisoned the database lock and left every
+/// later action in the app failing with it. The blocking pool is a thread whose
+/// whole purpose is to be blocked, so a runtime may be dropped there.
+async fn off_thread<T, F>(work: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(work)
+        .await
+        .map_err(|e| format!("the job did not finish: {e}"))?
 }
 
 /// Write the current state of the vault into the Drive folder.
 ///
 /// The database snapshot is refreshed first, so what lands in Drive is the
 /// library as it is now rather than as it was at the last close.
-#[tauri::command(async)]
-fn backup_to_drive(
-    app: AppHandle,
-    state: State<'_, Db>,
-    user: State<'_, CurrentUser>,
-) -> Result<sync::SyncReport, String> {
+#[tauri::command]
+async fn backup_to_drive(app: AppHandle) -> Result<sync::SyncReport, String> {
     let vault_root = paths::vault_root(&app)?;
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
 
-    // What travels must be current, so the sidecars and the snapshot are
-    // rewritten before anything is copied.
-    backup::write_all_sidecars(&conn, &vault_root, &user.0)?;
-    backup::snapshot(&conn, &vault_root)?;
+    off_thread(move || {
+        let db = app.state::<Db>();
+        let user = app.state::<CurrentUser>();
+        let conn = db.conn();
 
-    let report = if google::account(&conn).connected {
-        drive::DriveApiTarget::new(&conn).push(&vault_root)?
-    } else {
-        drive_target(&conn)
-            .ok_or(
-                "Not connected to Google Drive, and no synced folder was found. \
-                 Connect a Google account, or choose the folder Drive syncs.",
-            )?
-            .push(&vault_root)?
-    };
+        // What travels must be current, so the sidecars and the snapshot are
+        // rewritten before anything is copied.
+        backup::write_all_sidecars(&conn, &vault_root, &user.0)?;
+        backup::snapshot(&conn, &vault_root)?;
 
-    db::set_setting(&conn, LAST_SYNC, &chrono_now(&conn))?;
-    Ok(report)
+        let report = if google::account(&conn).connected {
+            drive::DriveApiTarget::new(&conn).push(&vault_root)?
+        } else {
+            drive_target(&conn)
+                .ok_or(
+                    "Not connected to Google Drive, and no synced folder was found. \
+                     Connect a Google account, or choose the folder Drive syncs.",
+                )?
+                .push(&vault_root)?
+        };
+
+        db::set_setting(&conn, LAST_SYNC, &chrono_now(&conn))?;
+        Ok(report)
+    })
+    .await
 }
 
 /// Copy back anything missing or different locally.
-#[tauri::command(async)]
-fn restore_from_drive(
-    app: AppHandle,
-    state: State<'_, Db>,
-    user: State<'_, CurrentUser>,
-) -> Result<sync::SyncReport, String> {
+#[tauri::command]
+async fn restore_from_drive(app: AppHandle) -> Result<sync::SyncReport, String> {
     let vault_root = paths::vault_root(&app)?;
-    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
 
-    let mut report = if google::account(&conn).connected {
-        drive::DriveApiTarget::new(&conn).pull(&vault_root)?
-    } else {
-        drive_target(&conn)
-            .ok_or("No Google Drive folder is set, and no Google account is connected.")?
-            .pull(&vault_root)?
-    };
+    off_thread(move || {
+        let db = app.state::<Db>();
+        let user = app.state::<CurrentUser>();
+        let mut conn = db.conn();
 
-    // Files alone are not a library. A restored phone has the documents on disk
-    // and nothing that knows whose they are, so the filenames are read back into
-    // rows — the reason the naming scheme carries date, patient and title in the
-    // first place. Failing here does not undo the copy: the files are safe, and
-    // Rescan can be run again.
-    if let Ok(found) = reconcile::run(&mut conn, &user.0, &vault_root) {
-        report.adopted = found.adopted.len();
-    }
+        let mut report = if google::account(&conn).connected {
+            drive::DriveApiTarget::new(&conn).pull(&vault_root)?
+        } else {
+            drive_target(&conn)
+                .ok_or("No Google Drive folder is set, and no Google account is connected.")?
+                .pull(&vault_root)?
+        };
 
-    Ok(report)
+        // Files alone are not a library. A restored phone has the documents on
+        // disk and nothing that knows whose they are, so the filenames are read
+        // back into rows — the reason the naming scheme carries date, patient and
+        // title in the first place. Failing here does not undo the copy: the
+        // files are safe, and Rescan can be run again.
+        if let Ok(found) = reconcile::run(&mut conn, &user.0, &vault_root) {
+            report.adopted = found.adopted.len();
+        }
+
+        Ok(report)
+    })
+    .await
 }
 
 /// SQLite owns the clock here, so the timestamp matches every other one stored.
@@ -769,7 +795,7 @@ fn backup_now(
     user: State<'_, CurrentUser>,
 ) -> Result<String, String> {
     let vault_root = paths::vault_root(&app)?;
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     let sidecars = backup::write_all_sidecars(&conn, &vault_root, &user.0)?;
     let path = backup::snapshot(&conn, &vault_root)?;
     Ok(format!("{} ({sidecars} sidecars)", path.display()))
@@ -784,7 +810,7 @@ fn rescan_vault(
     user: State<'_, CurrentUser>,
 ) -> Result<reconcile::ReconcileReport, String> {
     let vault_root = paths::vault_root(&app)?;
-    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+    let mut conn = state.conn();
     reconcile::run(&mut conn, &user.0, &vault_root)
 }
 
@@ -794,7 +820,7 @@ fn search_documents(
     user: State<'_, CurrentUser>,
     query: String,
 ) -> Result<Vec<search::SearchHit>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     search::search(&conn, &user.0, &query, 50)
 }
 
@@ -802,13 +828,13 @@ fn search_documents(
 /// disagree, and what a vault rescan will call.
 #[tauri::command(async)]
 fn reindex(state: State<'_, Db>, user: State<'_, CurrentUser>) -> Result<usize, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     search::reindex_all(&conn, &user.0)
 }
 
 #[tauri::command]
 fn list_categories(state: State<'_, Db>, user: State<'_, CurrentUser>) -> Result<Vec<categories::Category>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     categories::list(&conn, &user.0)
 }
 
@@ -819,19 +845,19 @@ fn create_category(
     name: String,
     color: Option<String>,
 ) -> Result<categories::Category, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     categories::create(&conn, &user.0, &name, color.as_deref())
 }
 
 #[tauri::command]
 fn rename_category(state: State<'_, Db>, user: State<'_, CurrentUser>, id: String, name: String) -> Result<(), String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     categories::rename(&conn, &user.0, &id, &name)
 }
 
 #[tauri::command]
 fn archive_category(state: State<'_, Db>, user: State<'_, CurrentUser>, id: String) -> Result<(), String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     categories::archive(&conn, &user.0, &id)
 }
 
@@ -842,7 +868,7 @@ fn set_document_categories(
     document_id: String,
     category_ids: Vec<String>,
 ) -> Result<(), String> {
-    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+    let mut conn = state.conn();
     categories::set_for_document(&mut conn, &user.0, &document_id, &category_ids)
 }
 
@@ -853,7 +879,7 @@ fn tag_documents(
     document_ids: Vec<String>,
     category_id: String,
 ) -> Result<usize, String> {
-    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+    let mut conn = state.conn();
     categories::tag_many(&mut conn, &user.0, &document_ids, &category_id)
 }
 
@@ -864,7 +890,7 @@ fn untag_documents(
     document_ids: Vec<String>,
     category_id: String,
 ) -> Result<usize, String> {
-    let mut conn = state.0.lock().map_err(|e| e.to_string())?;
+    let mut conn = state.conn();
     categories::untag_many(&mut conn, &user.0, &document_ids, &category_id)
 }
 
@@ -876,19 +902,19 @@ fn document_tags(
     user: State<'_, CurrentUser>,
     document_ids: Vec<String>,
 ) -> Result<Vec<(String, String)>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     categories::for_documents(&conn, &user.0, &document_ids)
 }
 
 #[tauri::command]
 fn list_documents(state: State<'_, Db>, user: State<'_, CurrentUser>) -> Result<Vec<documents::DocumentRow>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     documents::list(&conn, &user.0)
 }
 
 #[tauri::command]
 fn list_years(state: State<'_, Db>, user: State<'_, CurrentUser>) -> Result<Vec<String>, String> {
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     documents::years(&conn, &user.0)
 }
 
@@ -903,7 +929,7 @@ async fn export_pdf(
 ) -> Result<export::ExportResult, String> {
     let vault_root = paths::vault_root(&app)?;
     let work = paths::staging_dir(&app)?;
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     export::build(&conn, &user.0, &vault_root, &work, &request)
 }
 
@@ -917,7 +943,7 @@ fn export_to_folder(
     request: export::ExportRequest,
 ) -> Result<export::FolderExport, String> {
     let vault_root = paths::vault_root(&app)?;
-    let conn = state.0.lock().map_err(|e| e.to_string())?;
+    let conn = state.conn();
     export::to_folder(&conn, &user.0, &vault_root, &request)
 }
 
@@ -988,7 +1014,7 @@ fn stage_arguments(app: &AppHandle, argv: &[String]) -> usize {
     ) else {
         return 0;
     };
-    let Ok(conn) = db.0.lock() else { return 0 };
+    let conn = db.conn();
 
     match ingest::stage_batch(&conn, &user.0, &staging, &paths) {
         Ok(items) => {
@@ -1148,7 +1174,7 @@ pub fn run() {
                 let app = window.app_handle().clone();
 
                 if let (Ok(vault_root), Some(state)) = (paths::vault_root(&app), app.try_state::<Db>()) {
-                    if let Ok(conn) = state.0.lock() {
+                    if let conn = state.conn() {
                         match backup::snapshot(&conn, &vault_root) {
                             Ok(p) => eprintln!("backup written to {}", p.display()),
                             Err(e) => eprintln!("backup failed: {e}"),

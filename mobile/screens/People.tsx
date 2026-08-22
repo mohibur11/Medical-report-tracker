@@ -1,5 +1,6 @@
 import { useState } from 'react';
 
+import { useBusy } from '../busy.tsx';
 import { formatDmy, parseDmyInput } from '../../src/lib/extract/dates.ts';
 import { createPatient, renamePatient, type Patient } from '../../src/lib/ipc.ts';
 
@@ -19,6 +20,7 @@ export function People({
   onChanged: () => void;
   onError: (e: string) => void;
 }) {
+  const busyGate = useBusy();
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
   const [name, setName] = useState('');
@@ -37,8 +39,10 @@ export function People({
     }
     setBusy(true);
     try {
-      if (existing) await renamePatient(existing.id, name.trim(), iso);
-      else await createPatient(name.trim(), iso ?? undefined);
+      await busyGate.run(existing ? 'Renaming — every file moves…' : 'Adding…', async () => {
+        if (existing) await renamePatient(existing.id, name.trim(), iso);
+        else await createPatient(name.trim(), iso ?? undefined);
+      });
       setName('');
       setDob('');
       setAdding(false);

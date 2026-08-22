@@ -33,6 +33,38 @@ const SCOPE: &str = "https://www.googleapis.com/auth/drive.file openid email";
 
 pub const CLIENT_ID: &str = "google_client_id";
 pub const CLIENT_SECRET: &str = "google_client_secret";
+
+/// The OAuth client compiled in at build time, if the build had one.
+///
+/// Read from `src-tauri/google-client.env`, which is not in the repository: a
+/// client ID committed to a public repo gets used by strangers against the
+/// quota, and puts their app's name on somebody else's consent screen. Baking it
+/// into the binary instead is what lets a phone say "choose an account" rather
+/// than asking for a client ID and secret to be typed on a phone keyboard.
+///
+/// A client entered in the app still wins, so a build with nothing baked in
+/// behaves exactly as it did before, and anyone who wants their own can use it.
+const BAKED_CLIENT_ID: Option<&str> = option_env!("MRT_GOOGLE_CLIENT_ID");
+const BAKED_CLIENT_SECRET: Option<&str> = option_env!("MRT_GOOGLE_CLIENT_SECRET");
+
+/// The built-in client, but only if it is whole.
+///
+/// Both halves or neither: a build carrying an ID and no secret would look
+/// configured, skip the setup screen, and then fail the token exchange with
+/// `invalid_client` — worse than plainly asking for the credentials.
+fn baked_client() -> Option<(String, String)> {
+    let id = BAKED_CLIENT_ID?.trim();
+    let secret = BAKED_CLIENT_SECRET.unwrap_or_default().trim();
+    if id.is_empty() || secret.is_empty() {
+        return None;
+    }
+    Some((id.to_string(), secret.to_string()))
+}
+
+/// Is there a client to sign in with at all — stored, or built in?
+fn have_client(conn: &Connection) -> bool {
+    db::setting(conn, CLIENT_ID).is_some() || baked_client().is_some()
+}
 const REFRESH_TOKEN: &str = "google_refresh_token";
 const ACCOUNT_EMAIL: &str = "google_account_email";
 
@@ -63,7 +95,7 @@ pub struct Account {
 }
 
 pub fn account(conn: &Connection) -> Account {
-    let configured = db::setting(conn, CLIENT_ID).is_some();
+    let configured = have_client(conn);
 
     Account {
         email: db::setting(conn, ACCOUNT_EMAIL),
@@ -382,9 +414,14 @@ pub fn store(conn: &Connection, tokens: Tokens) -> Result<Account, String> {
 
 /// The client this installation signs in with, if one has been configured.
 pub fn client_credentials(conn: &Connection) -> Result<(String, String), String> {
-    let id = db::setting(conn, CLIENT_ID)
-        .ok_or("No Google client ID has been set. Add one in the Google Drive settings.")?;
-    Ok((id, db::setting(conn, CLIENT_SECRET).unwrap_or_default()))
+    // What the user entered, else what the build carries. In that order, so
+    // somebody who wants their own Google project can still have one.
+    if let Some(id) = db::setting(conn, CLIENT_ID) {
+        return Ok((id, db::setting(conn, CLIENT_SECRET).unwrap_or_default()));
+    }
+
+    baked_client()
+        .ok_or_else(|| "No Google client ID has been set. Add one in the Google Drive settings.".to_string())
 }
 
 /// Turn Google's JSON error into something a person can act on.

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { Spinner } from './Capture.tsx';
+import { useBusy } from '../busy.tsx';
 import { ImageViewer } from '../../src/components/ImageViewer.tsx';
 import { detectConflicts, isBlocked, type Conflict } from '../../src/lib/extract/conflicts.ts';
 import {
@@ -65,6 +66,7 @@ export function ReviewCard({
   const [preview, setPreview] = useState(false);
   /** Removal asks twice. A thumb-sized button next to Save gets hit by accident. */
   const [confirming, setConfirming] = useState(false);
+  const busyGate = useBusy();
 
   useEffect(() => {
     let alive = true;
@@ -124,14 +126,16 @@ export function ReviewCard({
     if (!patient || !iso) return;
     setBusy(true);
     try {
-      const doc = await commitItem({
-        ingestId: item.id,
-        patientId: patient.id,
-        docDate: iso,
-        title: title.trim(),
-        docType,
+      await busyGate.run('Filing this report…', async () => {
+        const doc = await commitItem({
+          ingestId: item.id,
+          patientId: patient.id,
+          docDate: iso,
+          title: title.trim(),
+          docType,
+        });
+        if (categoryId) await setDocumentCategories(doc.id, [categoryId]);
       });
-      if (categoryId) await setDocumentCategories(doc.id, [categoryId]);
       onDone();
     } catch (e) {
       onError(String(e));
@@ -142,7 +146,7 @@ export function ReviewCard({
   async function remove() {
     setBusy(true);
     try {
-      onRemoved(await discardStaged(item.id));
+      onRemoved(await busyGate.run('Removing…', () => discardStaged(item.id)));
     } catch (e) {
       onError(String(e));
       setBusy(false);
@@ -152,7 +156,7 @@ export function ReviewCard({
   async function unlock() {
     setBusy(true);
     try {
-      await unlockPdf(item.id, password);
+      await busyGate.run('Unlocking…', () => unlockPdf(item.id, password));
       setPassword('');
       onDone();
     } catch (e) {
