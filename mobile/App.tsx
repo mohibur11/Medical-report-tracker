@@ -126,10 +126,17 @@ export default function App() {
           />
         )}
         {tab === 'library' && (
-          <Library docs={docs} categories={categories} tags={tags} onChanged={refresh} onError={setError} />
+          <Library
+            docs={docs}
+            patients={patients}
+            categories={categories}
+            tags={tags}
+            onChanged={refresh}
+            onError={setError}
+          />
         )}
         {tab === 'people' && <People patients={patients} onChanged={refresh} onError={setError} />}
-        {tab === 'backup' && <Backup onError={setError} />}
+        {tab === 'backup' && <Backup onChanged={refresh} onError={setError} />}
       </main>
 
       <TabBar tab={tab} onTab={setTab} waiting={waiting} />

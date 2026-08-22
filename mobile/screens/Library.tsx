@@ -1,5 +1,7 @@
 import { useMemo, useState } from 'react';
 
+import { ReportSheet } from './ReportSheet.tsx';
+import { Trash } from './Trash.tsx';
 import { useBusy } from '../busy.tsx';
 import { formatDmy } from '../../src/lib/extract/dates.ts';
 import {
@@ -7,6 +9,7 @@ import {
   trashDocument,
   type Category,
   type DocumentRow,
+  type Patient,
 } from '../../src/lib/ipc.ts';
 
 /**
@@ -18,18 +21,22 @@ import {
  */
 export function Library({
   docs,
+  patients,
   categories,
   tags,
   onChanged,
   onError,
 }: {
   docs: DocumentRow[];
+  patients: Patient[];
   categories: Category[];
   tags: Record<string, string[]>;
   onChanged: () => void;
   onError: (e: string) => void;
 }) {
   const busyGate = useBusy();
+  /** The report being corrected, if any. */
+  const [editing, setEditing] = useState<DocumentRow | null>(null);
   const [query, setQuery] = useState('');
   const [category, setCategory] = useState('');
   const [hits, setHits] = useState<string[] | null>(null);
@@ -57,6 +64,20 @@ export function Library({
 
   return (
     <div className="px-4 py-4">
+      {editing && (
+        <ReportSheet
+          doc={editing}
+          patients={patients}
+          categories={categories}
+          tagIds={tags[editing.id] ?? []}
+          onDone={() => {
+            setEditing(null);
+            onChanged();
+          }}
+          onClose={() => setEditing(null)}
+          onError={onError}
+        />
+      )}
       <input
         className="h-12 w-full rounded-xl border border-slate-300 bg-white px-4 text-base outline-none focus:border-sky-500 dark:border-slate-700 dark:bg-slate-800"
         placeholder="Search reports and scanned text"
@@ -93,7 +114,12 @@ export function Library({
                 <span className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-[10px] font-semibold uppercase text-slate-500 dark:bg-slate-800">
                   {d.fileKind === 'pdf' ? 'PDF' : 'IMG'}
                 </span>
-                <span className="min-w-0 flex-1">
+                <button
+                  type="button"
+                  onClick={() => setEditing(d)}
+                  aria-label={`Edit ${d.title}`}
+                  className="min-w-0 flex-1 text-left"
+                >
                   <span className="block truncate text-base">{d.title}</span>
                   <span className="block text-xs text-slate-500 dark:text-slate-400">
                     {formatDmy(d.docDate)} · {d.patient}
@@ -104,7 +130,15 @@ export function Library({
                       {d.notes}
                     </span>
                   )}
-                </span>
+                  {(tags[d.id] ?? []).length > 0 && (
+                    <span className="mt-1 block truncate text-xs text-sky-700 dark:text-sky-400">
+                      {(tags[d.id] ?? [])
+                        .map((id) => categories.find((c) => c.id === id)?.name)
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </span>
+                  )}
+                </button>
                 <button
                   type="button"
                   aria-label={`Delete ${d.title}`}
@@ -133,6 +167,8 @@ export function Library({
           ))}
         </ul>
       )}
+
+      <Trash reload={docs.length} onRestored={onChanged} onError={onError} />
     </div>
   );
 }

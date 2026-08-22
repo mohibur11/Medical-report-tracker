@@ -23,7 +23,15 @@ import {
  * storage, which Android deletes when the app is uninstalled, so Drive is not a
  * second copy: it is the copy that survives.
  */
-export function Backup({ onError }: { onError: (e: string) => void }) {
+export function Backup({
+  onChanged,
+  onError,
+}: {
+  /** A restore brings back documents and people; the rest of the app has to
+   *  hear about it, or the library it is showing is the one from before. */
+  onChanged: () => void;
+  onError: (e: string) => void;
+}) {
   const [status, setStatus] = useState<DriveStatus | null>(null);
   const [report, setReport] = useState<SyncReport | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -70,6 +78,10 @@ export function Backup({ onError }: { onError: (e: string) => void }) {
         setReport(result as SyncReport);
       }
       await refresh();
+      // A restore is the one job here that changes the library itself. Without
+      // this the reports and people it brought back only appeared once something
+      // else happened to reload them.
+      if (what === 'down') onChanged();
     } catch (e) {
       onError(String(e));
     } finally {
