@@ -92,10 +92,10 @@ npm test             # TypeScript unit tests
 npm run typecheck    # tsc --noEmit
 
 cd src-tauri && cargo test   # Rust tests (naming, ingest, vault, export, search,
-                             # reconciler, sync, OAuth, DPAPI)
+                             # reconciler, sync, OAuth, DPAPI, upright)
 ```
 
-324 tests at present: 108 TypeScript, 216 Rust. The Rust suite drives real files
+365 tests at present: 108 TypeScript, 257 Rust. The Rust suite drives real files
 and a real SQLite database rather than mocks, so it takes about half a minute.
 
 All PDF assembly runs through **pdfcpu**, bundled as a Tauri sidecar. It is fetched

@@ -216,6 +216,29 @@ fn known_id(conn: &Connection, rel_path: &str) -> Option<String> {
     .ok()
 }
 
+/// Turn a refusal from Drive into something a person can act on.
+///
+/// The one that matters is a token without the Drive scope: it fails every
+/// single call the same way, and the raw JSON says "insufficient authentication
+/// scopes" 71 times without once saying which box to tick.
+fn explain(what: &str, body: &str) -> String {
+    if body.contains("ACCESS_TOKEN_SCOPE_INSUFFICIENT") || body.contains("insufficientPermissions") {
+        google::DRIVE_NOT_GRANTED.to_string()
+    } else if body.contains("accessNotConfigured") || body.contains("SERVICE_DISABLED") {
+        "The Google Drive API is not enabled in your Google Cloud project. Enable it at \
+         console.cloud.google.com/apis/library/drive.googleapis.com and try again."
+            .into()
+    } else {
+        format!("{what}: {body}")
+    }
+}
+
+/// A failure that will repeat for every file, so the loop should stop at the
+/// first rather than report it once per file.
+fn is_fatal(error: &str) -> bool {
+    error == google::DRIVE_NOT_GRANTED || error.contains("Drive API is not enabled")
+}
+
 fn client() -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
         // A large scan over a slow link needs longer than the default.
@@ -265,9 +288,9 @@ fn ensure_folder_named(token: &str, name: &str, parent: Option<&str>) -> Result<
         .send()
         .map_err(|e| format!("cannot create the folder in Drive: {e}"))?;
     if !created.status().is_success() {
-        return Err(format!(
-            "Drive refused to create '{name}': {}",
-            created.text().unwrap_or_default()
+        return Err(explain(
+            &format!("Drive refused to create '{name}'"),
+            &created.text().unwrap_or_default(),
         ));
     }
     let created: serde_json::Value = created
@@ -350,10 +373,9 @@ fn upload_file(
         .send()
         .map_err(|e| format!("cannot start the upload of {}: {e}", item.rel_path))?;
     if !started.status().is_success() {
-        return Err(format!(
-            "Drive refused {}: {}",
-            item.rel_path,
-            started.text().unwrap_or_default()
+        return Err(explain(
+            &format!("Drive refused {}", item.rel_path),
+            &started.text().unwrap_or_default(),
         ));
     }
     let location = started
@@ -370,10 +392,9 @@ fn upload_file(
         .send()
         .map_err(|e| format!("cannot upload {}: {e}", item.rel_path))?;
     if !done.status().is_success() {
-        return Err(format!(
-            "Drive rejected {}: {}",
-            item.rel_path,
-            done.text().unwrap_or_default()
+        return Err(explain(
+            &format!("Drive rejected {}", item.rel_path),
+            &done.text().unwrap_or_default(),
         ));
     }
 
@@ -436,9 +457,9 @@ fn list_remote(conn: &Connection, token: &str) -> Result<Vec<RemoteFile>, String
                 .send()
                 .map_err(|e| format!("cannot list the Drive folder: {e}"))?;
             if !response.status().is_success() {
-                return Err(format!(
-                    "Drive refused to list the backup: {}",
-                    response.text().unwrap_or_default()
+                return Err(explain(
+                    "Drive refused to list the backup",
+                    &response.text().unwrap_or_default(),
                 ));
             }
             let body: serde_json::Value = response
@@ -499,10 +520,9 @@ fn download(token: &str, file: &RemoteFile, dest: &Path) -> Result<u64, String> 
         .send()
         .map_err(|e| format!("cannot download {}: {e}", file.rel_path))?;
     if !response.status().is_success() {
-        return Err(format!(
-            "Drive refused {}: {}",
-            file.rel_path,
-            response.text().unwrap_or_default()
+        return Err(explain(
+            &format!("Drive refused {}", file.rel_path),
+            &response.text().unwrap_or_default(),
         ));
     }
     let bytes = response
@@ -551,6 +571,9 @@ impl BackupTarget for DriveApiTarget<'_> {
                     report.copied += 1;
                     report.bytes += item.size;
                 }
+                // A sign-in that cannot reach Drive fails every file the same
+                // way; say so once and stop.
+                Err(e) if is_fatal(&e) => return Err(e),
                 // One rejected file must not cost the rest of the backup.
                 Err(e) => report.failed.push(e),
             }
@@ -593,6 +616,7 @@ impl BackupTarget for DriveApiTarget<'_> {
                     report.copied += 1;
                     report.bytes += n;
                 }
+                Err(e) if is_fatal(&e) => return Err(e),
                 Err(e) => report.failed.push(e),
             }
         }
@@ -769,6 +793,23 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1);
         assert_eq!(known_id(&f.conn, "Rahim-Uddin").as_deref(), Some("folder-2"));
+    }
+
+    #[test]
+    fn a_token_without_the_drive_scope_is_explained_once_and_stops_the_sync() {
+        // Verbatim from a sync whose sign-in had the Drive box unticked.
+        let body = r#"{ "error": { "code": 403, "message": "Request had insufficient authentication scopes.", "errors": [ { "message": "Insufficient Permission", "domain": "global", "reason": "insufficientPermissions" } ], "status": "PERMISSION_DENIED", "details": [ { "@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": "ACCESS_TOKEN_SCOPE_INSUFFICIENT", "domain": "googleapis.com", "metadata": { "service": "drive.googleapis.com", "method": "google.apps.drive.v3.DriveFiles.Create" } } ] } }"#;
+        let e = explain("Drive refused to create 'MedicineReportTracker'", body);
+        assert_eq!(e, google::DRIVE_NOT_GRANTED);
+        assert!(is_fatal(&e), "would repeat for every file");
+
+        let e = explain("Drive refused x", r#"{"error":{"errors":[{"reason":"accessNotConfigured"}]}}"#);
+        assert!(e.contains("Drive API is not enabled"));
+        assert!(is_fatal(&e));
+
+        let e = explain("Drive refused x", "some other complaint");
+        assert_eq!(e, "Drive refused x: some other complaint");
+        assert!(!is_fatal(&e), "an ordinary refusal is per file");
     }
 
     #[test]

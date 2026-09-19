@@ -199,6 +199,29 @@ struct TokenResponse {
     refresh_token: Option<String>,
     #[serde(default)]
     expires_in: Option<u64>,
+    /// What was actually granted, space-separated. Not necessarily what was
+    /// asked for: Google's consent screen lets the user untick permissions one
+    /// by one, and a sign-in with Drive unticked succeeds — with a token that
+    /// every Drive call then refuses.
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+/// The sign-in went through, but without the one permission it was for.
+pub const DRIVE_NOT_GRANTED: &str = "Google signed you in without access to Drive — the \
+    \"See, edit, create and delete only the specific Google Drive files you use with this \
+    app\" box on Google's consent screen was left unticked. Disconnect, sign in again, and \
+    tick it.";
+
+/// Refuse a token that cannot reach Drive now, at sign-in, rather than let it be
+/// stored and fail on every file of the first backup.
+fn require_drive(scope: Option<&str>) -> Result<(), String> {
+    match scope {
+        Some(granted) if !granted.split_whitespace().any(|s| s.ends_with("/auth/drive.file")) => {
+            Err(DRIVE_NOT_GRANTED.into())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// What a completed sign-in yields, before any of it is stored.
@@ -292,6 +315,7 @@ pub fn finish(conn: &Connection, answer: &str) -> Result<Tokens, String> {
     let token: TokenResponse = response
         .json()
         .map_err(|e| format!("Google's reply could not be read: {e}"))?;
+    require_drive(token.scope.as_deref())?;
     let refresh = token
         .refresh_token
         .ok_or("Google did not return a refresh token. Remove this app at myaccount.google.com/permissions and try again.")?;
@@ -385,6 +409,7 @@ pub fn run_flow(
     let token: TokenResponse = response
         .json()
         .map_err(|e| format!("Google's reply could not be read: {e}"))?;
+    require_drive(token.scope.as_deref())?;
 
     let refresh = token
         .refresh_token
@@ -689,6 +714,24 @@ mod tests {
         let (a, _) = pkce_pair();
         let (b, _) = pkce_pair();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_sign_in_with_drive_unticked_is_refused_at_once() {
+        // What Google returns when only the identity boxes were ticked.
+        let err = require_drive(Some("openid https://www.googleapis.com/auth/userinfo.email"))
+            .unwrap_err();
+        assert_eq!(err, DRIVE_NOT_GRANTED);
+        assert!(err.contains("unticked"), "must say what to do");
+
+        assert!(require_drive(Some(
+            "https://www.googleapis.com/auth/drive.file openid https://www.googleapis.com/auth/userinfo.email"
+        ))
+        .is_ok());
+        // Order and extras do not matter; the one scope does.
+        assert!(require_drive(Some("email https://www.googleapis.com/auth/drive.file")).is_ok());
+        // An answer that says nothing about scope is not evidence of a problem.
+        assert!(require_drive(None).is_ok());
     }
 
     #[test]
