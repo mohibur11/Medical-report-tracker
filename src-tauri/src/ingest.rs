@@ -85,6 +85,11 @@ pub struct IngestItem {
     /// True when the pixels had to be rewritten. Surfaced in the grid because it is
     /// the difference between an upright export and a sideways one.
     pub orientation_baked: bool,
+    /// Clockwise degrees the staged image was turned so its text reads upright —
+    /// decided by the recognizer on first read, or by hand. None until then.
+    /// Distinct from the EXIF bake: that fixes how the phone was held, this
+    /// fixes how the paper lay.
+    pub text_rotation: Option<u16>,
     pub thumb_path: Option<String>,
 }
 
@@ -97,7 +102,7 @@ pub fn list_staged(conn: &Connection, user_id: &str) -> Result<Vec<IngestItem>, 
     let mut stmt = conn
         .prepare(
             "SELECT id, batch_id, src_path, status, error, file_kind, sha256,
-                    byte_size, page_count, exif_orientation
+                    byte_size, page_count, exif_orientation, text_rotation
                FROM ingest_items
               WHERE owner_user_id = ?1
                 AND document_id IS NULL
@@ -116,6 +121,7 @@ pub fn list_staged(conn: &Connection, user_id: &str) -> Result<Vec<IngestItem>, 
             let status: String = r.get(3)?;
             let kind: Option<String> = r.get(5)?;
             let exif_orientation: Option<u16> = r.get(9)?;
+            let text_rotation: Option<u16> = r.get(10)?;
 
             Ok(IngestItem {
                 id: r.get(0)?,
@@ -139,6 +145,7 @@ pub fn list_staged(conn: &Connection, user_id: &str) -> Result<Vec<IngestItem>, 
                 // Derived rather than stored: a bake happens exactly when the tag
                 // said anything other than upright.
                 orientation_baked: exif_orientation.is_some_and(|o| o != 1),
+                text_rotation,
                 thumb_path: None,
             })
         })
@@ -262,6 +269,7 @@ fn stage_one(
         page_count: None,
         exif_orientation: None,
         orientation_baked: false,
+        text_rotation: None,
         thumb_path: None,
     };
 

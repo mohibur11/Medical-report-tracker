@@ -66,6 +66,12 @@ export function ReviewCard({
   const [preview, setPreview] = useState(false);
   /** Removal asks twice. A thumb-sized button next to Save gets hit by accident. */
   const [confirming, setConfirming] = useState(false);
+  /** Clockwise degrees the page was turned so its text reads upright. */
+  const [turned, setTurned] = useState(item.textRotation ?? 0);
+  /** Bumped whenever the staged file changed, so the thumbnail is fetched again. */
+  const [fileVersion, setFileVersion] = useState(0);
+  /** Bumped by a hand turn: the old read is gone and the page is read again. */
+  const [readPass, setReadPass] = useState(0);
   const busyGate = useBusy();
 
   useEffect(() => {
@@ -74,7 +80,13 @@ export function ReviewCard({
     return () => {
       alive = false;
     };
-  }, [item.id]);
+  }, [item.id, fileVersion]);
+
+  function onTurned(degrees: number) {
+    setTurned(degrees);
+    setFileVersion((v) => v + 1);
+    setReadPass((n) => n + 1);
+  }
 
   useEffect(() => {
     if (item.status === 'locked') return;
@@ -83,10 +95,16 @@ export function ReviewCard({
     ocrQueue
       .run(() => (alive ? runOcr(item.id) : Promise.resolve(null)))
       .then(
-        (pages) => {
-          if (!alive || !pages) return;
+        (read) => {
+          if (!alive || !read) return;
           setReading(false);
-          const text = pages.map((p) => p.text).join('\n');
+          // The first read of an image may have turned the file on disk, in
+          // which case the thumbnail fetched on mount shows it the old way up.
+          if (read.textRotation !== turned) {
+            setTurned(read.textRotation);
+            setFileVersion((v) => v + 1);
+          }
+          const text = read.pages.map((p) => p.text).join('\n');
           setPageText(text);
 
           const ranked = rankDateCandidates(text);
@@ -107,7 +125,7 @@ export function ReviewCard({
     return () => {
       alive = false;
     };
-  }, [item.id, item.status]);
+  }, [item.id, item.status, readPass]);
 
   const iso = parseDmyInput(date);
   const patient = patients.find((p) => p.id === patientId);
@@ -205,7 +223,13 @@ export function ReviewCard({
 
   return (
     <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white dark:border-slate-800 dark:bg-slate-900">
-      {preview && <ImageViewer ingestId={item.id} onClose={() => setPreview(false)} />}
+      {preview && (
+        <ImageViewer
+          ingestId={item.id}
+          onClose={() => setPreview(false)}
+          onTurned={item.fileKind === 'pdf' ? undefined : onTurned}
+        />
+      )}
       <div className="flex gap-3 p-3">
         <button
           type="button"
@@ -227,6 +251,9 @@ export function ReviewCard({
         <div className="min-w-0 flex-1">
           <p className="selectable truncate text-xs text-slate-500 dark:text-slate-400">
             {item.fileName}
+            {turned !== 0 && (
+              <span className="ml-2 text-sky-600 dark:text-sky-400">turned {turned}°</span>
+            )}
           </p>
           <input
             className={`${field} mt-1 font-mono`}

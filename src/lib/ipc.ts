@@ -45,6 +45,13 @@ export interface IngestItem {
   height: number | null;
   exifOrientation: number | null;
   orientationBaked: boolean;
+  /**
+   * Clockwise degrees the staged image was turned so its text reads upright —
+   * decided by the recognizer on first read, or by hand. null until then.
+   * Distinct from the EXIF bake: that fixes how the phone was held, this fixes
+   * how the paper lay.
+   */
+  textRotation: number | null;
   thumbPath: string | null;
 }
 
@@ -173,11 +180,30 @@ export interface OcrPage {
   pageNo: number;
 }
 
+export interface Recognized {
+  /** One entry per page, so a multi-page scanned PDF comes back whole. */
+  pages: OcrPage[];
+  /**
+   * Clockwise degrees the staged image now stands turned by. Non-zero means the
+   * file on disk changed under this read, and its thumbnail is stale.
+   */
+  textRotation: number;
+}
+
 /**
- * Recognise text on a staged file — one entry per page, so a multi-page scanned
- * PDF comes back whole. Ranking the dates happens in the review grid.
+ * Recognise text on a staged file. The first read of an image also decides
+ * which way up its text is, and turns the file to match. Ranking the dates
+ * happens in the review grid.
  */
-export const runOcr = (ingestId: string): Promise<OcrPage[]> => invoke('run_ocr', { ingestId });
+export const runOcr = (ingestId: string): Promise<Recognized> => invoke('run_ocr', { ingestId });
+
+/**
+ * Turn a staged image by a quarter turn, clockwise, for when the recognizer
+ * chose wrong or could not choose. Resolves to the turn the file now stands at.
+ * The old read is dropped; the row reads again.
+ */
+export const turnStaged = (ingestId: string, degrees: 90 | 180 | 270): Promise<number> =>
+  invoke('turn_staged', { ingestId, degrees });
 
 export const ocrAvailable = (): Promise<boolean> => invoke('ocr_available');
 

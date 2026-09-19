@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 
-import { stagedPreview } from '../lib/ipc.ts';
+import { stagedPreview, turnStaged } from '../lib/ipc.ts';
 
 /**
  * The page, big enough to read, on both platforms.
@@ -19,11 +19,26 @@ import { stagedPreview } from '../lib/ipc.ts';
  * and Escape. The overlay is also rendered into `document.body` rather than where
  * it is written, so nothing it happens to sit inside can clip it.
  */
-export function ImageViewer({ ingestId, onClose }: { ingestId: string; onClose: () => void }) {
+export function ImageViewer({
+  ingestId,
+  onClose,
+  onTurned,
+}: {
+  ingestId: string;
+  onClose: () => void;
+  /**
+   * Offer a Turn button, and report the turn the file now stands at after each
+   * press. Left out for a PDF, which cannot be turned here.
+   */
+  onTurned?: (degrees: number) => void;
+}) {
   const [src, setSrc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [scale, setScale] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const [turning, setTurning] = useState(false);
+  /** Bumped after a turn, so the picture is fetched again. */
+  const [version, setVersion] = useState(0);
 
   /** Pointers currently down, for pinch — a phone has no wheel. */
   const pointers = useRef(new Map<number, { x: number; y: number }>());
@@ -43,7 +58,20 @@ export function ImageViewer({ ingestId, onClose }: { ingestId: string; onClose: 
     return () => {
       alive = false;
     };
-  }, [ingestId]);
+  }, [ingestId, version]);
+
+  async function turn() {
+    setTurning(true);
+    try {
+      const degrees = await turnStaged(ingestId, 90);
+      setVersion((v) => v + 1);
+      onTurned?.(degrees);
+    } catch {
+      // The picture is unchanged, and so is the screen; nothing to explain.
+    } finally {
+      setTurning(false);
+    }
+  }
 
   // Escape on a desktop, and the phone's back gesture — which otherwise leaves
   // the app entirely, which is a startling thing to happen when somebody meant
@@ -143,6 +171,21 @@ export function ImageViewer({ ingestId, onClose }: { ingestId: string; onClose: 
         </button>
 
         <div className="flex items-center gap-1">
+          {onTurned && (
+            <button
+              type="button"
+              onClick={() => void turn()}
+              disabled={turning || !src}
+              aria-label="Turn the page a quarter turn clockwise"
+              title="Turn the page"
+              className="mr-2 flex h-12 items-center gap-1 rounded-xl bg-white/10 px-3 text-sm text-white active:bg-white/25 disabled:opacity-50"
+            >
+              <span aria-hidden className="text-xl leading-none">
+                ↻
+              </span>
+              Turn
+            </button>
+          )}
           <button
             type="button"
             onClick={() => zoomBy(1 / 1.5)}

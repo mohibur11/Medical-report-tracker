@@ -18,6 +18,7 @@ mod search;
 mod secret;
 mod sniff;
 mod sync;
+mod upright;
 mod vault;
 
 use std::sync::Mutex;
@@ -338,8 +339,9 @@ fn commit_item(
 /// Recognise text on a staged file. Returns what was read; ranking the dates out
 /// of it happens in the review grid, where the user can see and correct the choice.
 #[tauri::command]
-async fn run_ocr(state: State<'_, Db>, ingest_id: String) -> Result<Vec<ocr::OcrPage>, String> {
-    // Recognition costs roughly a third of a second per page and must not hold the
+async fn run_ocr(state: State<'_, Db>, ingest_id: String) -> Result<ocr::Recognized, String> {
+    // Recognition costs roughly a third of a second per page — four times that
+    // for an image whose upright turn is still undecided — and must not hold the
     // database lock while it runs. A backlog import opens a queue of hundreds of
     // rows at once, and every other command — list, commit, search — would sit
     // behind them.
@@ -348,14 +350,30 @@ async fn run_ocr(state: State<'_, Db>, ingest_id: String) -> Result<Vec<ocr::Ocr
         ocr::staged_target(&conn, &ingest_id)?
     };
     if let Some(pages) = target.cached {
-        return Ok(pages);
+        return Ok(ocr::Recognized {
+            pages,
+            text_rotation: target.text_rotation.unwrap_or(0),
+        });
     }
 
-    let pages = ocr::recognize_file(&target.path, &target.kind)?;
+    let read = ocr::recognize_target(&target)?;
 
     let conn = state.conn();
-    ocr::store_ocr(&conn, &ingest_id, &pages)?;
-    Ok(pages)
+    ocr::store_ocr(&conn, &ingest_id, &read)?;
+    Ok(read)
+}
+
+/// Turn a staged image by a quarter turn, for when the detector chose wrong or
+/// could not choose. Returns the turn the file now stands at.
+#[tauri::command(async)]
+fn turn_staged(
+    state: State<'_, Db>,
+    user: State<'_, CurrentUser>,
+    ingest_id: String,
+    degrees: u16,
+) -> Result<u16, String> {
+    let conn = state.conn();
+    upright::turn_by_hand(&conn, &user.0, &ingest_id, degrees)
 }
 
 #[tauri::command]
@@ -1240,6 +1258,7 @@ pub fn run() {
             backup_to_drive,
             restore_from_drive,
             run_ocr,
+            turn_staged,
             ocr_available,
             lock_state,
             unlock,

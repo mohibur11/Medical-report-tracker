@@ -79,6 +79,18 @@ export function ReviewRow({
   const [titleIdeas, setTitleIdeas] = useState<Suggestion[]>([]);
   /** True when the text came out of the PDF itself rather than the recognizer. */
   const [exactText, setExactText] = useState(false);
+  /** Clockwise degrees the page was turned so its text reads upright. */
+  const [turned, setTurned] = useState(item.textRotation ?? 0);
+  /** Bumped whenever the staged file changed, so the thumbnail is fetched again. */
+  const [fileVersion, setFileVersion] = useState(0);
+  /** Bumped by a hand turn: the old read is gone and the page is read again. */
+  const [readPass, setReadPass] = useState(0);
+
+  function onTurned(degrees: number) {
+    setTurned(degrees);
+    setFileVersion((v) => v + 1);
+    setReadPass((n) => n + 1);
+  }
 
   /**
    * Read the page and pre-fill the date.
@@ -118,14 +130,25 @@ export function ReviewRow({
         }
 
         if (!alive) return null;
-        const pages = await runOcr(item.id);
-        return { exact: false, text: pages.map((p) => p.text).join('\n') };
+        const read = await runOcr(item.id);
+        return {
+          exact: false,
+          text: read.pages.map((p) => p.text).join('\n'),
+          turned: read.textRotation,
+        };
       })
       .then(
       (read) => {
         if (!alive || !read) return;
         setReading(false);
         setExactText(read.exact);
+
+        // The first read of an image may have turned the file on disk, in
+        // which case the thumbnail fetched on mount shows it the old way up.
+        if (read.turned !== undefined && read.turned !== turned) {
+          setTurned(read.turned);
+          setFileVersion((v) => v + 1);
+        }
 
         // Rank across the whole document. A twelve-page report carries its date
         // on the first page, but a covering letter or a lab slip can put it
@@ -152,7 +175,7 @@ export function ReviewRow({
     return () => {
       alive = false;
     };
-  }, [item.id, item.status]);
+  }, [item.id, item.status, readPass]);
 
   const iso = parseDmyInput(date);
   const patient = patients.find((p) => p.id === patientId);
@@ -250,7 +273,7 @@ export function ReviewRow({
         aria-label={`Select ${item.fileName}`}
         className="mt-1 size-4 shrink-0 accent-sky-600"
       />
-      <Thumb id={item.id} kind={item.fileKind} />
+      <Thumb id={item.id} kind={item.fileKind} version={fileVersion} onTurned={onTurned} />
 
       <div className="min-w-0 flex-1">
         <p className="selectable truncate text-xs text-slate-500 dark:text-slate-400">
@@ -258,6 +281,11 @@ export function ReviewRow({
           {item.orientationBaked && (
             <span className="ml-2 text-sky-600 dark:text-sky-400">
               rotated upright (EXIF {item.exifOrientation})
+            </span>
+          )}
+          {turned !== 0 && (
+            <span className="ml-2 text-sky-600 dark:text-sky-400">
+              turned {turned}° so the text reads upright
             </span>
           )}
         </p>

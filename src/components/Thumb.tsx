@@ -8,7 +8,19 @@ import { stagedThumb, type FileKind } from '../lib/ipc.ts';
  * a 200-file batch would otherwise push megabytes of base64 across the IPC bridge
  * before the first row rendered.
  */
-export function Thumb({ id, kind }: { id: string; kind: FileKind }) {
+export function Thumb({
+  id,
+  kind,
+  version = 0,
+  onTurned,
+}: {
+  id: string;
+  kind: FileKind;
+  /** Bump when the staged file changed under this thumbnail, to fetch it again. */
+  version?: number;
+  /** The viewer offers a Turn button when this is given. */
+  onTurned?: (degrees: number) => void;
+}) {
   const [src, setSrc] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
 
@@ -21,7 +33,7 @@ export function Thumb({ id, kind }: { id: string; kind: FileKind }) {
     return () => {
       alive = false;
     };
-  }, [id]);
+  }, [id, version]);
 
   const base =
     'flex h-16 w-12 shrink-0 items-center justify-center overflow-hidden rounded border ' +
@@ -44,7 +56,13 @@ export function Thumb({ id, kind }: { id: string; kind: FileKind }) {
         )}
       </button>
 
-      {open && <ImageViewer ingestId={id} onClose={() => setOpen(false)} />}
+      {open && (
+        <ImageViewer
+          ingestId={id}
+          onClose={() => setOpen(false)}
+          onTurned={kind === 'pdf' ? undefined : onTurned}
+        />
+      )}
     </>
   );
 }

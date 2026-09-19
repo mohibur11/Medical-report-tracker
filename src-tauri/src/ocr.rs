@@ -378,16 +378,30 @@ pub struct StagedTarget {
     pub cached: Option<Vec<OcrPage>>,
     pub path: std::path::PathBuf,
     pub kind: String,
+    /// Clockwise degrees the staged image has been turned to read upright.
+    /// None means nobody has decided yet — the detector runs on the first read
+    /// and only then. See `upright`.
+    pub text_rotation: Option<u16>,
+}
+
+/// What a read produced, and what it did to the file on the way.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Recognized {
+    pub pages: Vec<OcrPage>,
+    /// Clockwise degrees the staged image now stands turned by, so the row can
+    /// say so and fetch its thumbnail again. Always 0 for a PDF.
+    pub text_rotation: u16,
 }
 
 pub fn staged_target(conn: &rusqlite::Connection, ingest_id: &str) -> Result<StagedTarget, String> {
     use rusqlite::params;
 
-    let (staged, kind, json): (Option<String>, String, Option<String>) = conn
-        .query_row(
-            "SELECT staged_path, file_kind, ocr_json FROM ingest_items WHERE id = ?1",
+    let (staged, kind, json, text_rotation): (Option<String>, String, Option<String>, Option<u16>) =
+        conn.query_row(
+            "SELECT staged_path, file_kind, ocr_json, text_rotation FROM ingest_items WHERE id = ?1",
             params![ingest_id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .map_err(|e| format!("no such staged item: {e}"))?;
 
@@ -404,6 +418,7 @@ pub fn staged_target(conn: &rusqlite::Connection, ingest_id: &str) -> Result<Sta
         cached,
         path: std::path::PathBuf::from(path),
         kind,
+        text_rotation,
     })
 }
 
@@ -447,28 +462,49 @@ pub fn recognize_file(path: &std::path::Path, kind: &str) -> Result<Vec<OcrPage>
     }
 }
 
+/// Read a staged file, turning an image upright first if that has never been
+/// decided for it. The caller holds no database lock across this.
+pub fn recognize_target(target: &StagedTarget) -> Result<Recognized, String> {
+    if target.kind != "pdf" && target.text_rotation.is_none() {
+        let up = crate::upright::recognize_upright(&target.path)?;
+        return Ok(Recognized {
+            pages: vec![up.page],
+            text_rotation: up.rotation,
+        });
+    }
+    Ok(Recognized {
+        pages: recognize_file(&target.path, &target.kind)?,
+        text_rotation: target.text_rotation.unwrap_or(0),
+    })
+}
+
 pub fn store_ocr(
     conn: &rusqlite::Connection,
     ingest_id: &str,
-    pages: &[OcrPage],
+    read: &Recognized,
 ) -> Result<(), String> {
     use rusqlite::params;
 
     // One field for ranking and search, one for geometry, both keyed by page.
-    let combined = pages
+    let combined = read
+        .pages
         .iter()
         .map(|p| p.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
 
+    // The turn is recorded with the text it was decided by. A PDF's is 0, which
+    // marks it decided too — nothing turns a PDF, so nothing should ask again.
     conn.execute(
         "UPDATE ingest_items
-         SET ocr_text = ?2, ocr_json = ?3, ocr_at = datetime('now'), updated_at = datetime('now')
+         SET ocr_text = ?2, ocr_json = ?3, ocr_at = datetime('now'), text_rotation = ?4,
+             updated_at = datetime('now')
          WHERE id = ?1",
         params![
             ingest_id,
             combined,
-            serde_json::to_string(pages).unwrap_or_default()
+            serde_json::to_string(&read.pages).unwrap_or_default(),
+            read.text_rotation,
         ],
     )
     .map_err(|e| format!("cannot store recognised text: {e}"))?;
@@ -487,9 +523,9 @@ pub fn recognize_staged(
     if let Some(pages) = target.cached {
         return Ok(pages);
     }
-    let pages = recognize_file(&target.path, &target.kind)?;
-    store_ocr(conn, ingest_id, &pages)?;
-    Ok(pages)
+    let read = recognize_target(&target)?;
+    store_ocr(conn, ingest_id, &read)?;
+    Ok(read.pages)
 }
 
 #[cfg(test)]

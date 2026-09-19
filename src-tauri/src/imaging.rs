@@ -86,6 +86,11 @@ fn downscale(img: &DynamicImage, max_edge: u32, filter: image::imageops::FilterT
     )
 }
 
+/// The staged print derivative's encoding, for anything that rewrites one.
+pub fn encode_print(img: &DynamicImage) -> Result<Vec<u8>, String> {
+    encode_jpeg(img, PRINT_QUALITY)
+}
+
 fn encode_jpeg(img: &DynamicImage, quality: u8) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     // Baseline YCbCr 8-bit. RGBA sources must lose their alpha or the encoder errors;
@@ -114,6 +119,39 @@ pub fn thumbnail_of_any(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let img = image::load_from_memory(bytes).map_err(|e| format!("decode failed: {e}"))?;
     let thumb = downscale(&img, THUMB_LONG_EDGE, image::imageops::FilterType::Triangle);
     encode_jpeg(&thumb, THUMB_QUALITY)
+}
+
+/// Turn an image by a multiple of a quarter turn, clockwise. Anything else is a
+/// caller bug and leaves the image alone rather than guessing.
+pub fn rotate_cw(img: &DynamicImage, degrees: u16) -> DynamicImage {
+    match degrees % 360 {
+        90 => img.rotate90(),
+        180 => img.rotate180(),
+        270 => img.rotate270(),
+        _ => img.clone(),
+    }
+}
+
+/// The print derivative and its thumbnail, from an image that is already baked
+/// and already print-sized — a staged file being turned after the fact.
+///
+/// The print copy is re-encoded, so it goes through JPEG twice. At q78 on a
+/// photographed document the second generation is not visible, and the
+/// alternative — keeping the original around to turn from — would double what
+/// staging holds for every image on the off chance one needs turning.
+pub struct Turned {
+    pub print_jpeg: Vec<u8>,
+    pub thumb_jpeg: Vec<u8>,
+}
+
+pub fn turn_staged(bytes: &[u8], degrees: u16) -> Result<Turned, String> {
+    let img = image::load_from_memory(bytes).map_err(|e| format!("decode failed: {e}"))?;
+    let img = rotate_cw(&img, degrees);
+    let thumb = downscale(&img, THUMB_LONG_EDGE, image::imageops::FilterType::Triangle);
+    Ok(Turned {
+        print_jpeg: encode_jpeg(&img, PRINT_QUALITY)?,
+        thumb_jpeg: encode_jpeg(&thumb, THUMB_QUALITY)?,
+    })
 }
 
 /// Decode, bake, and produce both derivatives from raw file bytes.
@@ -230,6 +268,35 @@ mod tests {
         for o in 2..=8 {
             assert!(needs_bake(o));
         }
+    }
+
+    #[test]
+    fn quarter_turns_are_clockwise_and_anything_else_is_ignored() {
+        // Source is 4x2 with red at (0,0). A clockwise quarter turn puts the
+        // top-left corner at the top-right.
+        assert_eq!(red_at(&rotate_cw(&probe(), 90)), (1, 0));
+        assert_eq!(red_at(&rotate_cw(&probe(), 180)), (3, 1));
+        assert_eq!(red_at(&rotate_cw(&probe(), 270)), (0, 3));
+        assert_eq!(red_at(&rotate_cw(&probe(), 0)), (0, 0));
+        assert_eq!(red_at(&rotate_cw(&probe(), 45)), (0, 0), "not a quarter turn: untouched");
+        assert_eq!(rotate_cw(&probe(), 450).width(), 2, "wraps past a full turn");
+    }
+
+    #[test]
+    fn turning_a_staged_file_swaps_its_dimensions_and_redraws_the_thumbnail() {
+        let mut page = RgbImage::from_pixel(400, 200, Rgb([255, 255, 255]));
+        page.put_pixel(0, 0, Rgb([255, 0, 0]));
+        let mut bytes = Vec::new();
+        DynamicImage::ImageRgb8(page)
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+            .unwrap();
+
+        let t = turn_staged(&bytes, 90).unwrap();
+        assert!(t.print_jpeg.starts_with(&[0xFF, 0xD8, 0xFF]));
+        let print = image::load_from_memory(&t.print_jpeg).unwrap();
+        assert_eq!((print.width(), print.height()), (200, 400));
+        let thumb = image::load_from_memory(&t.thumb_jpeg).unwrap();
+        assert_eq!((thumb.width(), thumb.height()), (160, 320), "thumbnail follows the turn");
     }
 
     #[test]

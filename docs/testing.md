@@ -43,6 +43,11 @@ Drag scans or PDFs anywhere in the window. Try dropping a whole folder at once.
 Watch for:
 
 - **Photos that were sideways come out upright**, and say `rotated upright (EXIF 6)`.
+- **A report that lay sideways or upside down on the table comes out upright
+  too**, once the page has been read, and says `turned 90° so the text reads
+  upright`. The thumbnail changes under you as it happens. This is decided by
+  reading the page four ways, so a blank page or a handwritten prescription is
+  left as it came — open it and press **Turn** to fix one by hand.
 - **The same file twice is rejected** as a duplicate — by content, so renaming it
   first makes no difference.
 - **An iPhone HEIC is skipped** with an explanation, not a crash.
