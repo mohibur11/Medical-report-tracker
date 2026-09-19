@@ -42,6 +42,8 @@ impl Db {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DbHealth {
+    /// The app's own version, from tauri.conf.json — which reads package.json.
+    pub app_version: String,
     pub sqlite_version: String,
     pub fts5: bool,
     pub journal_mode: String,
@@ -257,6 +259,7 @@ pub fn ensure_user(conn: &Connection) -> Result<String, String> {
 
 pub fn health(
     conn: &Connection,
+    app_version: String,
     db_path: String,
     vault_path: String,
 ) -> Result<DbHealth, String> {
@@ -266,6 +269,7 @@ pub fn health(
     };
 
     Ok(DbHealth {
+        app_version,
         sqlite_version: conn
             .query_row("SELECT sqlite_version()", [], |r| r.get(0))
             .map_err(|e| e.to_string())?,

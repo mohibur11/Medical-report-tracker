@@ -1,0 +1,77 @@
+# Build the Windows installer and publish it as a GitHub release.
+#
+# Runs when a version tag is pushed — `git tag v0.3.0 && git push --tags` — and
+# only then, because a build takes several minutes and the artifact is 9 MB.
+# The tag must match the version in package.json (npm run version:bump keeps
+# every copy in step), or the installer would carry one number and the release
+# another.
+#
+# The Google OAuth client is baked in from repository secrets when present, the
+# same way a local build reads google-client.env. Without them the app still
+# works and asks the user for a client of their own.
+#
+# Only the desktop installer is built here. The Android app is built by hand
+# for now — see docs/android.md.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The tag must be the version in package.json
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$version" ]; then
+            echo "tag v$tag but package.json says $version — run: npm run version:bump -- $tag"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      # The pdfcpu sidecar is fetched, not committed; the installer needs it.
+      - run: npm run fetch:sidecar
+
+      - run: npm run typecheck
+      - run: npm test
+
+      - name: Build the installer
+        env:
+          MRT_GOOGLE_CLIENT_ID: ${{ secrets.MRT_GOOGLE_CLIENT_ID }}
+          MRT_GOOGLE_CLIENT_SECRET: ${{ secrets.MRT_GOOGLE_CLIENT_SECRET }}
+        run: npm run build
+
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: src-tauri/target/release/bundle/nsis/*-setup.exe
+          generate_release_notes: true
+          body: |
+            Download the `-setup.exe` below and run it. It upgrades an existing install in place.
+
+            The installer is unsigned, so Windows SmartScreen shows *"Windows protected your PC"*
+            on first run. Click **More info → Run anyway**.

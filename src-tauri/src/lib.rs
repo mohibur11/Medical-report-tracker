@@ -18,6 +18,7 @@ mod search;
 mod secret;
 mod sniff;
 mod sync;
+mod update;
 mod upright;
 mod vault;
 
@@ -38,9 +39,33 @@ fn db_health(app: AppHandle, state: State<'_, Db>) -> Result<DbHealth, String> {
     let conn = state.conn();
     db::health(
         &conn,
+        app.package_info().version.to_string(),
         paths::db_path(&app)?.display().to_string(),
         paths::vault_root(&app)?.display().to_string(),
     )
+}
+
+/// Ask GitHub whether a newer installer exists. Only ever on request: the app
+/// does not phone home on its own.
+#[tauri::command]
+async fn check_for_update(app: AppHandle) -> Result<update::UpdateCheck, String> {
+    let current = app.package_info().version.to_string();
+    off_thread(move || update::check(&current)).await
+}
+
+/// Open the installer's download in the browser — the one place a download
+/// belongs, where the user can see what is arriving and where it lands.
+#[tauri::command]
+fn open_download(app: AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    // Only somewhere this app would have pointed at. The URL comes back from
+    // the update check, but a command is callable by anything in the window.
+    if !url.starts_with("https://github.com/") && !url.starts_with("https://objects.githubusercontent.com/") {
+        return Err("not a download this app offers".into());
+    }
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| format!("cannot open the browser: {e}"))
 }
 
 /// Stage dropped files. Returns one row per input including failures, so the
@@ -1259,6 +1284,8 @@ pub fn run() {
             restore_from_drive,
             run_ocr,
             turn_staged,
+            check_for_update,
+            open_download,
             ocr_available,
             lock_state,
             unlock,

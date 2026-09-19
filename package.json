@@ -1,6 +1,6 @@
 {
   "name": "medicine-report-tracker",
-  "version": "0.0.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "Offline medical report vault: ingest scans, file them by patient and year, export a filtered slice as one merged PDF.",
@@ -15,6 +15,7 @@
     "dev:mobile": "vite --config vite.mobile.config.ts",
     "build:mobile": "vite build --config vite.mobile.config.ts",
     "typecheck": "tsc --noEmit",
+    "version:bump": "node scripts/bump-version.mjs",
     "test": "node --test \"tests/**/*.test.ts\"",
     "tauri": "tauri",
     "fetch:sidecar": "node scripts/fetch-sidecar.mjs",

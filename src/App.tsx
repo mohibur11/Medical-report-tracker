@@ -17,6 +17,7 @@ import { RemoveFromQueue } from './components/RemoveFromQueue.tsx';
 import { ReviewRow, type RowHandle } from './components/ReviewRow.tsx';
 import { Thumb } from './components/Thumb.tsx';
 import { TrashPanel } from './components/TrashPanel.tsx';
+import { UpdateCheck } from './components/UpdateCheck.tsx';
 import { VaultTools } from './components/VaultTools.tsx';
 import { fileEach, summarize } from './lib/bulk.ts';
 import { formatDmy } from './lib/extract/dates.ts';
@@ -470,11 +471,21 @@ export default function App() {
           )}{' '}
           · {docs.length} filed · {patients.length} patient
           {patients.length === 1 ? '' : 's'}
-          <span className="ml-3 font-mono text-slate-400 dark:text-slate-500">
-            {sys
-              ? `SQLite ${sys.sqliteVersion} · schema ${sys.schemaVersion} · ${sys.journalMode}`
-              : 'backend: not connected'}
-          </span>
+          {sys ? (
+            <UpdateCheck version={sys.appVersion} />
+          ) : (
+            <span className="ml-3 font-mono text-slate-400 dark:text-slate-500">
+              backend: not connected
+            </span>
+          )}
+          {sys && (
+            <span
+              className="ml-3 font-mono text-slate-400 dark:text-slate-500"
+              title={`${sys.dbPath}\n${sys.vaultPath}`}
+            >
+              SQLite {sys.sqliteVersion} · schema {sys.schemaVersion} · {sys.journalMode}
+            </span>
+          )}
           {sys && sys.pendingJournalOps > 0 && (
             <span className="ml-2 font-medium text-amber-600">
               {sys.pendingJournalOps} pending file ops

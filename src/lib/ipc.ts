@@ -9,6 +9,8 @@
 import { invoke } from '@tauri-apps/api/core';
 
 export interface DbHealth {
+  /** The app's own version, as the installer names it. */
+  appVersion: string;
   sqliteVersion: string;
   fts5: boolean;
   journalMode: string;
@@ -56,6 +58,20 @@ export interface IngestItem {
 }
 
 export const health = (): Promise<DbHealth> => invoke('db_health');
+
+export interface UpdateCheck {
+  current: string;
+  latest: string;
+  newer: boolean;
+  /** The installer itself when the release has one; the release page otherwise. */
+  downloadUrl: string;
+}
+
+/** Ask GitHub for the newest release. Only on request — never at launch. */
+export const checkForUpdate = (): Promise<UpdateCheck> => invoke('check_for_update');
+
+/** Open a download from the update check in the browser. */
+export const openDownload = (url: string): Promise<void> => invoke('open_download', { url });
 
 /** Stage dropped files. Returns one row per input, failures included. */
 export const importFiles = (paths: string[]): Promise<IngestItem[]> =>

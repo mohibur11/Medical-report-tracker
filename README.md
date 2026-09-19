@@ -17,6 +17,42 @@ Google Drive all work; recognition pre-fills the review screen. See
 Still open: putting a document back from Trash without using Explorer, golden-file
 export tests, accuracy measured on a larger sample, and code signing.
 
+## Installing
+
+Download the newest `Medicine Report Tracker_<version>_x64-setup.exe` from
+[Releases](https://github.com/mohibur11/Medical-report-tracker/releases/latest)
+and run it. It upgrades an existing install in place; the library and database
+are untouched, and the database is migrated forward on first launch.
+
+The installer is unsigned — see [Signing the installer](#signing-the-installer)
+— so SmartScreen will object the first time. **More info → Run anyway**.
+
+The app shows its version in the header, next to a **check for updates** link.
+That link is the only time it contacts GitHub; nothing is checked at launch.
+
+## Releasing
+
+The version lives in `package.json`; everything else reads it or is kept in
+step by the bump script. A release is a tag:
+
+```sh
+npm run version:bump -- 0.3.0
+git commit -am "Release 0.3.0"
+git tag v0.3.0
+git push && git push --tags
+```
+
+Pushing the tag runs [release.yml](.github/workflows/release.yml), which builds
+the installer on a Windows runner and publishes it under that tag with
+generated notes. The workflow refuses a tag that does not match `package.json`.
+
+To bake the Google OAuth client into released builds, set repository secrets
+`MRT_GOOGLE_CLIENT_ID` and `MRT_GOOGLE_CLIENT_SECRET`. Without them the release
+still works and asks the user for a client of their own, as below.
+
+Only the desktop installer is released this way. The Android app is built by
+hand — see [docs/android.md](docs/android.md).
+
 ## Backing up to Google Drive
 
 Two ways, and the app picks whichever is available.
@@ -92,10 +128,10 @@ npm test             # TypeScript unit tests
 npm run typecheck    # tsc --noEmit
 
 cd src-tauri && cargo test   # Rust tests (naming, ingest, vault, export, search,
-                             # reconciler, sync, OAuth, DPAPI, upright)
+                             # reconciler, sync, OAuth, DPAPI, upright, update)
 ```
 
-365 tests at present: 108 TypeScript, 257 Rust. The Rust suite drives real files
+368 tests at present: 108 TypeScript, 260 Rust. The Rust suite drives real files
 and a real SQLite database rather than mocks, so it takes about half a minute.
 
 All PDF assembly runs through **pdfcpu**, bundled as a Tauri sidecar. It is fetched
